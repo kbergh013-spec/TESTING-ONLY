@@ -3937,7 +3937,7 @@ async def faq_delete(interaction: discord.Interaction):
 # =========================
 # /faq ADMIN COMMANDS
 # =========================
-faq_group = app_commands.Group(name="faq", description="Manage FAQ entries", guild=discord.Object(id=GUILD_ID))
+faq_group = app_commands.Group(name="faq", description="Manage FAQ entries")
 faq_category_group = app_commands.Group(name="category", description="Manage FAQ categories", parent=faq_group)
 
 
