@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-print("RUNNING VERSION: structured-prizes-5-faq-db")
+print("RUNNING VERSION: structured-prizes-6-faq-tools")
 
 # =========================
 # ENV / SECRETS
@@ -1894,6 +1894,87 @@ class OldPrizePickView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(OldPrizePickSelect(old_prizes=old_prizes))
 
+ # =========================
+# FAQ VIEWS — MOD (send to channel)
+# =========================
+
+class ModFaqCategoryView(discord.ui.View):
+    """Ephemeral category picker for the mod FAQ Tools button."""
+    def __init__(self):
+        super().__init__(timeout=120)
+        categories = get_active_faq_categories()
+        for i, cat in enumerate(categories[:20]):
+            self.add_item(ModFaqCategoryButton(
+                label=cat["name"],
+                category_id=cat["id"],
+                index=i
+            ))
+
+
+class ModFaqCategoryButton(discord.ui.Button):
+    def __init__(self, label: str, category_id: int, index: int):
+        super().__init__(
+            label=label,
+            style=discord.ButtonStyle.primary,
+            row=min(index // 5, 3)
+        )
+        self.category_id = category_id
+
+    async def callback(self, interaction: discord.Interaction):
+        view = ModFaqAnswerView(category_id=self.category_id, category_name=self.label)
+        await interaction.response.edit_message(
+            content=f"**{self.label} FAQs** — click a question to send it to the ticket:",
+            view=view
+        )
+
+
+class ModFaqAnswerView(discord.ui.View):
+    """Ephemeral question picker for mods. Clicking sends the answer publicly."""
+    def __init__(self, category_id: int, category_name: str):
+        super().__init__(timeout=120)
+        entries = get_faq_entries_by_category(category_id, visibility="public")
+        for i, entry in enumerate(entries[:25]):
+            label = entry["question"][:80]
+            self.add_item(ModFaqSendButton(
+                label=label,
+                question=entry["question"],
+                answer=entry["answer"],
+                index=i
+            ))
+
+
+class ModFaqSendButton(discord.ui.Button):
+    """Mod clicks → answer posts publicly as bold question + answer."""
+    def __init__(self, label: str, question: str, answer: str, index: int):
+        super().__init__(
+            label=label,
+            style=discord.ButtonStyle.secondary,
+            row=min(index // 5, 4)
+        )
+        self.question = question
+        self.answer = answer
+
+    async def callback(self, interaction: discord.Interaction):
+        if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
+            await interaction.response.send_message("❌ Only mods can send FAQs to the ticket.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
+            return
+        message_content = f"**{self.question}**\n\n{self.answer}"
+        await interaction.response.edit_message(
+            content=f"✅ Sent **{self.question[:60]}** to the ticket.",
+            view=None
+        )
+        if len(message_content) <= 2000:
+            await channel.send(message_content)
+        else:
+            await channel.send(message_content[:2000])
+            remaining = message_content[2000:]
+            while remaining:
+                await channel.send(remaining[:2000])
+                remaining = remaining[2000:]       
 
 # =========================
 # FAQ VIEWS  (reads from Postgres)
@@ -2238,6 +2319,25 @@ class SupportTicketControls(discord.ui.View):
             ephemeral=True,
             view=SupportDeleteConfirmView()
         )
+    @discord.ui.button(label="FAQ Tools", style=discord.ButtonStyle.primary, emoji="📋", custom_id="support_faq_tools")
+    async def faq_tools_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member):
+            await interaction.response.send_message("❌ Invalid user.", ephemeral=True)
+            return
+        if user_is_mod(interaction.user):
+            view = ModFaqCategoryView()
+            await interaction.response.send_message(
+                "📋 **FAQ Tools** — Select a category, then click a question to send it to this ticket:",
+                view=view,
+                ephemeral=True
+            )
+        else:
+            view = FaqCategoryView()
+            await interaction.response.send_message(
+                "**Frequently Asked Questions** — Select a category to browse questions:",
+                view=view,
+                ephemeral=True
+            )
 
 
 class OpenSupportTicketView(discord.ui.View):
