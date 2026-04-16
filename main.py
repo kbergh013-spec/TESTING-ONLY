@@ -1869,15 +1869,6 @@ class GiveawayTicketControls(discord.ui.View):
                 "Select which prize to replace:",
                 view=view,
                 ephemeral=True
-            )
-        else:
-            view = OldPrizePickView(old_prizes=old_prizes)
-            await interaction.response.send_message(
-                "Select which prize to replace:",
-                view=view,
-                ephemeral=True
-            )
-
 
 class OldPrizePickSelect(discord.ui.Select):
     def __init__(self, old_prizes: list[str]):
