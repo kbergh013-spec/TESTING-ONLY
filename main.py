@@ -1922,10 +1922,9 @@ class ModFaqCategoryButton(discord.ui.Button):
 
 async def callback(self, interaction: discord.Interaction):
         view = ModFaqAnswerView(category_id=self.category_id, category_name=self.label)
-        await interaction.response.send_message(
+        await interaction.response.edit_message(
             content=f"**{self.label} FAQs** — click a question to send it to the ticket:",
-            view=view,
-            ephemeral=True
+            view=view
         )
 
 class ModFaqAnswerView(discord.ui.View):
