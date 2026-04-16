@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-print("RUNNING VERSION: structured-prizes-7-faq-admin")
+print("RUNNING VERSION: structured-prizes-8-faq-admin")
 
 # =========================
 # ENV / SECRETS
@@ -1954,11 +1954,12 @@ class ModFaqSendButton(discord.ui.Button):
         self.question = question
         self.answer = answer
 
-    async def callback(self, interaction: discord.Interaction):
+async def callback(self, interaction: discord.Interaction):
         if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
             await interaction.response.send_message("❌ Only mods can send FAQs to the ticket.", ephemeral=True)
             return
         channel = interaction.channel
+        print(f"[FAQ SEND] question={self.question[:40]} channel={channel} user={interaction.user}")
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
             return
@@ -1974,8 +1975,9 @@ class ModFaqSendButton(discord.ui.Button):
             remaining = message_content[2000:]
             while remaining:
                 await channel.send(remaining[:2000])
-                remaining = remaining[2000:]       
+                remaining = remaining[2000:]   
 
+    
 # =========================
 # FAQ VIEWS  (reads from Postgres)
 # =========================
