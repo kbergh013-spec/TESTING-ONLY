@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-print("RUNNING VERSION: structured-prizes-6-faq-tools")
+print("RUNNING VERSION: structured-prizes-7-faq-admin")
 
 # =========================
 # ENV / SECRETS
@@ -3606,6 +3606,396 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message("Something went wrong. Please try again.", ephemeral=True)
     except Exception:
         pass
+
+# =========================
+# /faq ADMIN COMMANDS
+# =========================
+faq_group = app_commands.Group(name="faq", description="Manage FAQ entries", guild=discord.Object(id=GUILD_ID))
+faq_category_group = app_commands.Group(name="category", description="Manage FAQ categories", parent=faq_group)
+
+
+# ── /faq add ──────────────────────────────────────────────────────────────────
+
+class FaqAddCategorySelect(discord.ui.Select):
+    def __init__(self, categories: list[dict]):
+        options = [
+            discord.SelectOption(label=c["name"], value=str(c["id"]))
+            for c in categories[:25]
+        ]
+        super().__init__(placeholder="Select a category", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        category_id = int(self.values[0])
+        category_name = next(o.label for o in self.options if o.value == self.values[0])
+        await interaction.response.send_modal(FaqAddModal(category_id=category_id, category_name=category_name))
+
+
+class FaqAddCategoryView(discord.ui.View):
+    def __init__(self, categories: list[dict]):
+        super().__init__(timeout=120)
+        self.add_item(FaqAddCategorySelect(categories))
+
+
+class FaqAddModal(discord.ui.Modal):
+    def __init__(self, category_id: int, category_name: str):
+        super().__init__(title=f"Add FAQ — {category_name[:40]}")
+        self.category_id = category_id
+        self.question_input = discord.ui.TextInput(
+            label="Question",
+            placeholder="Enter the question",
+            max_length=200,
+            required=True
+        )
+        self.answer_input = discord.ui.TextInput(
+            label="Answer",
+            placeholder="Enter the answer",
+            max_length=1800,
+            required=True,
+            style=discord.TextStyle.paragraph
+        )
+        self.add_item(self.question_input)
+        self.add_item(self.answer_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COALESCE(MAX(sort_order), -1) + 1
+                        FROM faq_entries
+                        WHERE category_id = %s AND active = true
+                    """, (self.category_id,))
+                    next_sort = cur.fetchone()[0]
+                    cur.execute("""
+                        INSERT INTO faq_entries
+                            (category_id, question, answer, visibility, escalate, active, sort_order,
+                             created_by_discord_id, updated_by_discord_id)
+                        VALUES (%s, %s, %s, 'public', false, true, %s, %s, %s)
+                    """, (
+                        self.category_id,
+                        self.question_input.value.strip(),
+                        self.answer_input.value.strip(),
+                        next_sort,
+                        str(interaction.user.id),
+                        str(interaction.user.id),
+                    ))
+                conn.commit()
+            await interaction.response.send_message(
+                f"✅ FAQ added successfully.\n**Q:** {self.question_input.value.strip()[:100]}",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to add FAQ: `{e}`", ephemeral=True)
+
+
+@faq_group.command(name="add", description="Add a new FAQ question to a category")
+async def faq_add(interaction: discord.Interaction):
+    if not await ensure_mod(interaction):
+        return
+    categories = get_active_faq_categories()
+    if not categories:
+        await interaction.response.send_message("❌ No active categories found.", ephemeral=True)
+        return
+    view = FaqAddCategoryView(categories)
+    await interaction.response.send_message(
+        "Select a category to add the FAQ to:",
+        view=view,
+        ephemeral=True
+    )
+
+
+# ── /faq edit ─────────────────────────────────────────────────────────────────
+
+class FaqEditCategorySelect(discord.ui.Select):
+    def __init__(self, categories: list[dict]):
+        options = [
+            discord.SelectOption(label=c["name"], value=str(c["id"]))
+            for c in categories[:25]
+        ]
+        super().__init__(placeholder="Select a category", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        category_id = int(self.values[0])
+        entries = get_faq_entries_by_category(category_id, visibility="all")
+        if not entries:
+            await interaction.response.edit_message(
+                content="❌ No active entries in that category.", view=None
+            )
+            return
+        view = FaqEditQuestionView(entries=entries)
+        await interaction.response.edit_message(
+            content="Select a question to edit:",
+            view=view
+        )
+
+
+class FaqEditCategoryView(discord.ui.View):
+    def __init__(self, categories: list[dict]):
+        super().__init__(timeout=120)
+        self.add_item(FaqEditCategorySelect(categories))
+
+
+class FaqEditQuestionSelect(discord.ui.Select):
+    def __init__(self, entries: list[dict]):
+        options = [
+            discord.SelectOption(label=e["question"][:100], value=str(e["id"]))
+            for e in entries[:25]
+        ]
+        super().__init__(placeholder="Select a question", min_values=1, max_values=1, options=options)
+        self.entries = entries
+
+    async def callback(self, interaction: discord.Interaction):
+        entry_id = int(self.values[0])
+        entry = get_faq_entry_by_id(entry_id)
+        if not entry:
+            await interaction.response.edit_message(content="❌ Entry not found.", view=None)
+            return
+        await interaction.response.send_modal(FaqEditModal(entry=entry))
+
+
+class FaqEditQuestionView(discord.ui.View):
+    def __init__(self, entries: list[dict]):
+        super().__init__(timeout=120)
+        self.add_item(FaqEditQuestionSelect(entries))
+
+
+class FaqEditModal(discord.ui.Modal):
+    def __init__(self, entry: dict):
+        super().__init__(title="Edit FAQ")
+        self.entry_id = entry["id"]
+        self.question_input = discord.ui.TextInput(
+            label="Question",
+            default=entry["question"][:200],
+            max_length=200,
+            required=True
+        )
+        self.answer_input = discord.ui.TextInput(
+            label="Answer",
+            default=entry["answer"][:1800],
+            max_length=1800,
+            required=True,
+            style=discord.TextStyle.paragraph
+        )
+        self.add_item(self.question_input)
+        self.add_item(self.answer_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE faq_entries
+                        SET question = %s,
+                            answer = %s,
+                            updated_at = now(),
+                            updated_by_discord_id = %s
+                        WHERE id = %s
+                    """, (
+                        self.question_input.value.strip(),
+                        self.answer_input.value.strip(),
+                        str(interaction.user.id),
+                        self.entry_id,
+                    ))
+                conn.commit()
+            await interaction.response.send_message(
+                f"✅ FAQ updated.\n**Q:** {self.question_input.value.strip()[:100]}",
+                ephemeral=True
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Failed to update FAQ: `{e}`", ephemeral=True)
+
+
+@faq_group.command(name="edit", description="Edit an existing FAQ question")
+async def faq_edit(interaction: discord.Interaction):
+    if not await ensure_mod(interaction):
+        return
+    categories = get_active_faq_categories()
+    if not categories:
+        await interaction.response.send_message("❌ No active categories found.", ephemeral=True)
+        return
+    view = FaqEditCategoryView(categories)
+    await interaction.response.send_message(
+        "Select the category containing the FAQ to edit:",
+        view=view,
+        ephemeral=True
+    )
+
+
+# ── /faq delete ───────────────────────────────────────────────────────────────
+
+class FaqDeleteCategorySelect(discord.ui.Select):
+    def __init__(self, categories: list[dict]):
+        options = [
+            discord.SelectOption(label=c["name"], value=str(c["id"]))
+            for c in categories[:25]
+        ]
+        super().__init__(placeholder="Select a category", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        category_id = int(self.values[0])
+        entries = get_faq_entries_by_category(category_id, visibility="all")
+        if not entries:
+            await interaction.response.edit_message(
+                content="❌ No active entries in that category.", view=None
+            )
+            return
+        view = FaqDeleteQuestionView(entries=entries)
+        await interaction.response.edit_message(
+            content="Select a question to delete:",
+            view=view
+        )
+
+
+class FaqDeleteCategoryView(discord.ui.View):
+    def __init__(self, categories: list[dict]):
+        super().__init__(timeout=120)
+        self.add_item(FaqDeleteCategorySelect(categories))
+
+
+class FaqDeleteQuestionSelect(discord.ui.Select):
+    def __init__(self, entries: list[dict]):
+        options = [
+            discord.SelectOption(label=e["question"][:100], value=str(e["id"]))
+            for e in entries[:25]
+        ]
+        super().__init__(placeholder="Select a question to delete", min_values=1, max_values=1, options=options)
+        self.entries = entries
+
+    async def callback(self, interaction: discord.Interaction):
+        entry_id = int(self.values[0])
+        entry = get_faq_entry_by_id(entry_id)
+        if not entry:
+            await interaction.response.edit_message(content="❌ Entry not found.", view=None)
+            return
+        view = FaqDeleteConfirmView(entry_id=entry_id, question=entry["question"])
+        await interaction.response.edit_message(
+            content=(
+                f"⚠️ **Confirm delete**\n\n"
+                f"**Q:** {entry['question'][:200]}\n\n"
+                "This will soft-delete the entry (sets active = false). It can be restored via the database."
+            ),
+            view=view
+        )
+
+
+class FaqDeleteQuestionView(discord.ui.View):
+    def __init__(self, entries: list[dict]):
+        super().__init__(timeout=120)
+        self.add_item(FaqDeleteQuestionSelect(entries))
+
+
+class FaqDeleteConfirmView(discord.ui.View):
+    def __init__(self, entry_id: int, question: str):
+        super().__init__(timeout=60)
+        self.entry_id = entry_id
+        self.question = question
+
+    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE faq_entries
+                        SET active = false,
+                            updated_at = now(),
+                            updated_by_discord_id = %s
+                        WHERE id = %s
+                    """, (str(interaction.user.id), self.entry_id))
+                conn.commit()
+            await interaction.response.edit_message(
+                content=f"🗑️ FAQ deleted: **{self.question[:100]}**",
+                view=None
+            )
+        except Exception as e:
+            await interaction.response.edit_message(
+                content=f"❌ Failed to delete FAQ: `{e}`",
+                view=None
+            )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="Cancelled.", view=None)
+
+
+@faq_group.command(name="delete", description="Delete a FAQ question (soft delete)")
+async def faq_delete(interaction: discord.Interaction):
+    if not await ensure_mod(interaction):
+        return
+    categories = get_active_faq_categories()
+    if not categories:
+        await interaction.response.send_message("❌ No active categories found.", ephemeral=True)
+        return
+    view = FaqDeleteCategoryView(categories)
+    await interaction.response.send_message(
+        "Select the category containing the FAQ to delete:",
+        view=view,
+        ephemeral=True
+    )
+
+
+# ── /faq category add ─────────────────────────────────────────────────────────
+
+class FaqCategoryAddModal(discord.ui.Modal, title="Add FAQ Category"):
+    name_input = discord.ui.TextInput(
+        label="Category name",
+        placeholder="e.g. Payments, Mobile App, API",
+        max_length=80,
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = self.name_input.value.strip()
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COALESCE(MAX(sort_order), -1) + 1
+                        FROM faq_categories
+                        WHERE active = true
+                    """)
+                    next_sort = cur.fetchone()[0]
+                    cur.execute("""
+                        INSERT INTO faq_categories
+                            (name, sort_order, active, created_by_discord_id, updated_by_discord_id)
+                        VALUES (%s, %s, true, %s, %s)
+                    """, (name, next_sort, str(interaction.user.id), str(interaction.user.id)))
+                conn.commit()
+            await interaction.response.send_message(
+                f"✅ Category **{name}** added successfully.",
+                ephemeral=True
+            )
+        except Exception as e:
+            if "unique" in str(e).lower():
+                await interaction.response.send_message(
+                    f"❌ A category named **{name}** already exists.", ephemeral=True
+                )
+            else:
+                await interaction.response.send_message(f"❌ Failed to add category: `{e}`", ephemeral=True)
+
+
+@faq_category_group.command(name="add", description="Add a new FAQ category")
+async def faq_category_add(interaction: discord.Interaction):
+    if not await ensure_mod(interaction):
+        return
+    await interaction.response.send_modal(FaqCategoryAddModal())
+
+
+# ── /faq category delete ──────────────────────────────────────────────────────
+
+class FaqCategoryDeleteSelect(discord.ui.Select):
+    def __init__(self, categories: list[dict]):
+        options = [
+            discord.SelectOption(label=c["name"], value=str(c["id"]))
+            for c in categories[:25]
+        ]
+        super().__init__(placeholder="Select a category to delete", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        category_id = int(self.values[0])
+        category = get_faq_category_by_id(category_id)
+        if not category:
+            await interaction.response.edit_message(content="❌ Categ
 
 
 bot.run(TOKEN)
