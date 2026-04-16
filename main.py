@@ -1845,20 +1845,28 @@ class GiveawayTicketControls(discord.ui.View):
         if not isinstance(channel, discord.TextChannel) or not is_giveaway_ticket_channel(channel):
             await interaction.response.send_message("❌ Prize updates only work inside giveaway ticket channels.", ephemeral=True)
             return
+        await interaction.response.defer(ephemeral=True)
         bundle_entries = find_entries_for_channel(channel)
         if not bundle_entries:
-            await interaction.response.send_message("❌ No entries found for this ticket.", ephemeral=True)
+            await interaction.followup.send("❌ No entries found for this ticket.", ephemeral=True)
             return
         old_prizes = dedupe_preserve_order([e.get("prize", "Unknown Prize") for e in bundle_entries])
         if len(old_prizes) == 1:
             old_prize = old_prizes[0]
             firms = get_active_prop_firms()
             if not firms:
-                await interaction.response.send_message("❌ No active prop firms found in catalog.", ephemeral=True)
+                await interaction.followup.send("❌ No active prop firms found in catalog.", ephemeral=True)
                 return
             view = UpdatePrizeFirmView(old_prize=old_prize, firms=firms)
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"**Update Prize**\nReplacing: **{old_prize}**\n\nSelect the new prop firm:",
+                view=view,
+                ephemeral=True
+            )
+        else:
+            view = OldPrizePickView(old_prizes=old_prizes)
+            await interaction.followup.send(
+                "Select which prize to replace:",
                 view=view,
                 ephemeral=True
             )
