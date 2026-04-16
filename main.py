@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-print("RUNNING VERSION: structured-prizes-4")
+print("RUNNING VERSION: structured-prizes-5-faq-db")
 
 # =========================
 # ENV / SECRETS
@@ -188,8 +188,545 @@ def init_db():
                     ADD COLUMN IF NOT EXISTS account_size_id INTEGER,
                     ADD COLUMN IF NOT EXISTS custom_prize_text TEXT
             """)
+
+            # -------------------------
+            # FAQ TABLES
+            # -------------------------
+            # faq_categories: one row per category (TradingView, Discord, Billing, etc.)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS faq_categories (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    active BOOLEAN NOT NULL DEFAULT true,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    created_by_discord_id TEXT,
+                    updated_by_discord_id TEXT
+                )
+            """)
+            # faq_entries: one row per question/answer pair
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS faq_entries (
+                    id SERIAL PRIMARY KEY,
+                    category_id INTEGER NOT NULL REFERENCES faq_categories(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL,
+                    answer TEXT NOT NULL,
+                    visibility TEXT NOT NULL DEFAULT 'public',
+                    escalate BOOLEAN NOT NULL DEFAULT false,
+                    active BOOLEAN NOT NULL DEFAULT true,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    created_by_discord_id TEXT,
+                    updated_by_discord_id TEXT
+                )
+            """)
+
         conn.commit()
     print("[DB] Tables initialized.")
+    seed_faqs()
+
+
+# =========================
+# FAQ SEED DATA
+# =========================
+# This runs once on startup. If faq_categories already has rows, it exits immediately.
+# To re-seed: DELETE FROM faq_categories; (cascade deletes entries too)
+
+_FAQ_SEED: list[dict] = [
+    {
+        "name": "TradingView",
+        "sort_order": 0,
+        "entries": [
+            {
+                "question": "How do I link my TradingView username?",
+                "answer": "Your TradingView account is linked directly from the top-right corner of the Dashboard. You only need to do this one time. Once your TradingView username is connected, indicator access will be granted automatically to that account.",
+                "sort_order": 0,
+            },
+            {
+                "question": "Indicator missing on TradingView?",
+                "answer": "If your indicator isn't showing up on TradingView, first make sure your TradingView username is linked in your Dashboard. Indicator access is granted to the username you provide. If it's already linked and you still don't see it, try refreshing TradingView or use the chat assistant to run an access check. If you are still having issues, disconnect your TradingView from the website and reconnect it.",
+                "sort_order": 1,
+            },
+            {
+                "question": "I linked the wrong TradingView username. How do I fix it?",
+                "answer": "Go to your Dashboard and update your TradingView username in the top-right corner. Once updated, access will automatically transfer to the correct account. If you still experience issues, describe the problem in this ticket and a moderator will assist you.",
+                "sort_order": 2,
+            },
+            {
+                "question": "Can I use the indicators on multiple TradingView accounts?",
+                "answer": "Indicator access is granted to one TradingView username per subscription. If you need access on a different account, you must update your username in the Dashboard.",
+                "sort_order": 3,
+            },
+        ],
+    },
+    {
+        "name": "Discord",
+        "sort_order": 1,
+        "entries": [
+            {
+                "question": "How do I link my Discord account?",
+                "answer": "Your Discord account is linked directly from the top-right corner of the Dashboard. You only need to do this one time. Once connected, your Discord roles and access will sync automatically based on your active subscription.",
+                "sort_order": 0,
+            },
+            {
+                "question": "Having trouble seeing Discord channels?",
+                "answer": "If you can't see certain Discord channels, make sure your Discord account is linked in your Dashboard. Once connected, your roles sync automatically based on your active purchases. If you've already linked your Discord and still don't have access, a moderator has been notified and will assist you shortly.",
+                "sort_order": 1,
+                "escalate": True,
+            },
+            {
+                "question": "Why can't I type in the Discord chats?",
+                "answer": "This is because you haven't completed the email verification process. While you are in the discord find the channel / section towards the top that says 'Start Here' click it. Next you'll see a drop down with different options, select '#Step Three'. You'll see a blue button that says 'Start email verification'. Complete this and you will now be able to type in the chats.",
+                "sort_order": 2,
+            },
+            {
+                "question": "Is the community active every day?",
+                "answer": "Yes. The Discord community is active daily with market discussion, trade breakdowns, live shows, and member interaction. You're never trading alone — there's always structure, support, and FUN.",
+                "sort_order": 3,
+            },
+            {
+                "question": "What happens if I am banned from the Discord?",
+                "answer": "If you are banned from our Discord community, the ban is final and non-negotiable. Our moderation team enforces community guidelines to maintain a respectful and productive environment for all members. As such, banned users will not be reinstated and appeals will not be considered.",
+                "sort_order": 4,
+            },
+        ],
+    },
+    {
+        "name": "Billing",
+        "sort_order": 2,
+        "entries": [
+            {
+                "question": "How do I upgrade my subscription?",
+                "answer": "All subscription changes are handled in the Manage Billing section of the Dashboard. Navigate to Dashboard → Billing → Manage Billing to upgrade your subscription at any time.",
+                "sort_order": 0,
+            },
+            {
+                "question": "How do I cancel my subscription?",
+                "answer": "You can cancel your subscription from the Manage Billing section of the Dashboard. Go to Dashboard → Billing → Manage Billing, where you can cancel your subscription directly.",
+                "sort_order": 1,
+            },
+            {
+                "question": "Do you offer refunds?",
+                "answer": "Due to the digital nature of our products (indicators, courses, and community access), all purchases are final. If you believe there has been a billing error, a moderator has been notified and will assist you shortly.",
+                "sort_order": 2,
+                "escalate": True,
+            },
+            {
+                "question": "What do I do if I was charged twice for an indicator subscription?",
+                "answer": "A moderator has been notified and will assist you shortly.",
+                "sort_order": 3,
+                "escalate": True,
+            },
+        ],
+    },
+    {
+        "name": "Indicators",
+        "sort_order": 3,
+        "entries": [
+            {
+                "question": "Help me pick the right indicator(s)",
+                "answer": "We offer powerful trading indicators designed for different trading styles — from scalping to swing trading. Each indicator has unique features to help you spot opportunities in the market. Visit our Indicators page to browse the full collection and find the perfect fit for your strategy: https://www.maxoptionstrading.com/indicators",
+                "sort_order": 0,
+            },
+            {
+                "question": "What indicator(s) do you recommend?",
+                "answer": "All of our MOT indicators are great! The best part is that you can mix and match them together for additional confluence. https://www.maxoptionstrading.com/indicators",
+                "sort_order": 1,
+            },
+            {
+                "question": "What markets do your indicators work on?",
+                "answer": "Our indicators are designed to work across multiple markets including stocks, options, futures, and crypto. Many members use them for intraday trading as well as swing trading strategies.",
+                "sort_order": 2,
+            },
+            {
+                "question": "Are the indicators beginner-friendly?",
+                "answer": "Yes! Our indicators are built to be powerful yet easy to understand. We also provide tutorials, live examples during shows, and community support to help you learn how to use them effectively.",
+                "sort_order": 3,
+            },
+            {
+                "question": "What makes your indicators different?",
+                "answer": "Our indicators are built from real trading experience — not theory. They're designed to simplify decision-making, improve timing, and help you trade with confidence. Many members combine them for added confluence and stronger setups. You'll also see them used live during our shows so you can learn exactly how to apply them in real time.",
+                "sort_order": 4,
+            },
+            {
+                "question": "My Discord role is not showing up after purchasing an indicator.",
+                "answer": "On the website remove your discord access, then reconnect your discord to the website and your role will be available.",
+                "sort_order": 5,
+            },
+        ],
+    },
+    {
+        "name": "Courses",
+        "sort_order": 4,
+        "entries": [
+            {
+                "question": "Can you please help me pick a course?",
+                "answer": "Our courses are designed to take you from beginner to advanced trader. Whether you're just starting out or looking to refine your strategy, we have courses covering everything from the basics to advanced techniques. Visit our Courses page to explore what's available: https://www.maxoptionstrading.com/courses (also check out the testimonials posted on trustpilot: https://www.trustpilot.com/review/www.maxoptionstrading.com)",
+                "sort_order": 0,
+            },
+            {
+                "question": "How do I transfer my WHOP purchases to the website?",
+                "answer": "A moderator has been notified and will assist you shortly with a redemption code.",
+                "sort_order": 1,
+                "escalate": True,
+            },
+            {
+                "question": "My Discord role is not showing up after purchasing the course.",
+                "answer": "On the website remove your discord access, then connect your discord back to the website and your roles will be available.",
+                "sort_order": 2,
+            },
+            {
+                "question": "I have issues watching the course content.",
+                "answer": "To ensure videos play properly, please follow these recommendations:\n\nAlways use the latest version of both your operating system and browser for best compatibility.\n\nDesktop (Windows/Mac):\n- Latest version of Chrome or Firefox is recommended.\n- Edge (v129 or later) is supported on Windows 10+.\n- Safari works if FairPlay DRM is integrated.\n\nAndroid (Phone/Tablet/Chromebook):\n- Latest version of Chrome (Android 5+).\n- If Chrome does not work, try the latest version of Firefox or Edge.\n\niOS (iPhone/iPad):\n- Updated Safari is recommended.\n- iOS 11.2 or later is required.\n- Chrome may work on newer iOS versions, but Safari is the most reliable option.\n\nIf the recommended options above don't work, it may also require that you clear your cache.",
+                "sort_order": 3,
+            },
+        ],
+    },
+    {
+        "name": "Live Shows",
+        "sort_order": 5,
+        "entries": [
+            {
+                "question": "What time are the live shows?",
+                "answer": "We have three daily live shows:\n\nBig Daddy Morning Show — Daily from 9:30 AM to 11:30 AM EST (Mon-Fri)\nPower Hour Special — Daily from 2:45 PM to 4:15 PM EST (Mon-Fri)\nHappy Hour — Daily from 5:45pm to 7:45pm EST (Sun-Thur)\n\nVisit the MOT Network to watch the shows live or catch up on previous shows posted on our Youtube channel: https://www.youtube.com/@MaxOptionsTrading",
+                "sort_order": 0,
+            },
+            {
+                "question": "Are all of the live shows recorded?",
+                "answer": "Yes, all live shows are recorded. You can access previous shows on our Youtube channel: https://www.youtube.com/@MaxOptionsTrading",
+                "sort_order": 1,
+            },
+            {
+                "question": "When does 'Traders and Haters' podcast go live?",
+                "answer": "Traders and Haters podcast is recorded every Tuesday evening at 5pm EST. The show gets edited, and posted on Youtube the following Monday evening.",
+                "sort_order": 2,
+            },
+            {
+                "question": "How do I access the live shows?",
+                "answer": "Live shows are streamed inside the Discord community and on the MOT Network. Make sure your Discord account is linked and your subscription is active to access member-only streams.",
+                "sort_order": 3,
+            },
+            {
+                "question": "How often do you do hit bangers like this?",
+                "answer": "EVERY. F-ING. DAY.",
+                "sort_order": 4,
+            },
+        ],
+    },
+    {
+        "name": "General",
+        "sort_order": 6,
+        "entries": [
+            {
+                "question": "How do I get the MOT tag?",
+                "answer": "On a computer: Click on the MOT tag next someone's name in the discord and click Adopt tag, or:\n- Click on the server name in the upper menu on Discord\n- Go to server tag\n- Adopt the MOT tag\n\nOn a mobile device:\n- Go to profile\n- Edit profile\n- Go to server/guild tag\n- Choose the MOT tag and save",
+                "sort_order": 0,
+            },
+            {
+                "question": "How do I enter in Giveaways?",
+                "answer": "General rules for giveaways in our discord:\n1. You must be a verified member in our server.\n2. Get the MOT tag in order to be eligible.\n3. Join the live tradings or podcast to get randomly picked.",
+                "sort_order": 1,
+            },
+            {
+                "question": "I previously won an account through MOT. How do I qualify for the 'double up' program?",
+                "answer": "A moderator has been notified and will assist you shortly.\n\nTo qualify, please have the following ready:\n1) A screenshot of the evaluation account we gave you\n2) A screenshot of the funded account\n3) A screenshot of a payout",
+                "sort_order": 2,
+                "escalate": True,
+            },
+            {
+                "question": "How long does it take for my access to activate?",
+                "answer": "Access is typically granted instantly after your purchase is completed. If you don't see your Discord roles or TradingView indicators within a few minutes, try logging out and back in to your Dashboard. If the issue continues, a moderator has been notified and will assist you shortly.",
+                "sort_order": 3,
+                "escalate": True,
+            },
+            {
+                "question": "What platform do you recommend for trading?",
+                "answer": "Many of our members trade using platforms like TradingView for charting and Tradeovate for futures execution. However, you can use any broker or platform that fits your trading style.",
+                "sort_order": 4,
+            },
+            {
+                "question": "Is this community suitable for beginners?",
+                "answer": "Absolutely. We have traders at all experience levels — from complete beginners to funded prop firm traders. Our courses, live breakdowns, and coaching options are designed to help you grow at every stage.",
+                "sort_order": 5,
+            },
+            {
+                "question": "Do you offer a free trial?",
+                "answer": "At this time, we do not offer free trials. However, we provide free educational content on our YouTube channel so you can see our strategies and teaching style before purchasing.",
+                "sort_order": 6,
+            },
+            {
+                "question": "What happens after I subscribe?",
+                "answer": "Immediately after subscribing:\n1. Link your Discord and TradingView accounts in your Dashboard\n2. Your roles and indicator access sync automatically\n3. Jump into the live sessions and start learning",
+                "sort_order": 7,
+            },
+            {
+                "question": "Is this just for options traders?",
+                "answer": "No. Our strategies and indicators are used for futures, stocks, options, and even crypto. The principles we teach — structure, momentum, liquidity, and risk management — apply across markets.",
+                "sort_order": 8,
+            },
+            {
+                "question": "What if I don't have much time to trade?",
+                "answer": "We offer multiple live sessions throughout the day, plus recorded content. Whether you trade full-time or part-time, you can plug into the sessions that fit your schedule and review recordings when needed.",
+                "sort_order": 9,
+            },
+            {
+                "question": "Can I actually become profitable using your system?",
+                "answer": "Profitability depends on discipline and execution — but we give you the tools, structure, and mentorship to dramatically shorten your learning curve. Members who commit, follow the system, and manage risk properly see the biggest improvements.",
+                "sort_order": 10,
+            },
+            {
+                "question": "Why should I join Max Options Trading?",
+                "answer": "We don't just live trade — we're education + entertainment + execution + accountability.\nInside Max Options Trading, you get live breakdowns, proven indicators, structured courses, and a serious community of traders focused on consistency.\nOur goal isn't hype — it's helping you build real, repeatable skills.",
+                "sort_order": 11,
+            },
+        ],
+    },
+    {
+        "name": "Prop Firms",
+        "sort_order": 7,
+        "entries": [
+            {
+                "question": "Which prop firms do you recommend?",
+                "answer": "We've partnered with top-tier prop firms that we personally trust and use. These are vetted trading firms that offer great funding opportunities for serious traders. Check out our Partners page to see our recommended prop firms: https://www.maxoptionstrading.com/partners",
+                "sort_order": 0,
+            },
+            {
+                "question": "I've failed prop firm challenges before. Can this help?",
+                "answer": "Yes. Many members join specifically to improve their evaluation performance. We focus heavily on discipline, risk management, and high-probability setups — which are critical for passing and maintaining funded accounts.",
+                "sort_order": 1,
+            },
+        ],
+    },
+    {
+        "name": "Coaching",
+        "sort_order": 8,
+        "entries": [
+            {
+                "question": "How can I book a trading coach?",
+                "answer": "Looking for personalized guidance? Our verified trading coaches offer 1-on-1 mentorship sessions to help you level up your trading game. Get personalized feedback, strategy reviews, and accelerate your learning. Visit our Coaching page to browse available coaches and book a session: https://www.maxoptionstrading.com/coaching",
+                "sort_order": 0,
+            },
+        ],
+    },
+    {
+        "name": "WealthCharts",
+        "sort_order": 9,
+        "entries": [
+            {
+                "question": "How do I set up Wealthcharts for trading futures?",
+                "answer": "Check out this how to video that Max made on this! https://youtu.be/BWwowJY_cho?si=2oZtFwIKUYQa3fuB",
+                "sort_order": 0,
+            },
+            {
+                "question": "How do I link my indicators to WealthCharts?",
+                "answer": "https://scribehow.com/viewer/How_to_link_your_indicator_to_WealthCharts_on_the_MOT_website__ctDUpjC4R4anyEZYQvfAiw",
+                "sort_order": 1,
+            },
+            {
+                "question": "Where do I find my indicators on WealthCharts?",
+                "answer": "https://scribehow.com/embed-preview/How_to_Access_MOT_Indicators_on_Wealthcharts__rrasDmTlT62JUoKS_Ju-wg?as=slides&size=flexible",
+                "sort_order": 2,
+            },
+        ],
+    },
+    {
+        "name": "YouTube",
+        "sort_order": 10,
+        "entries": [
+            {
+                "question": "Where can I find free content about ORB?",
+                "answer": "Take advantage of all free content around ORB on Max Options trading on YouTube, starting with: https://www.youtube.com/watch?v=SunW-hRFGzY",
+                "sort_order": 0,
+            },
+            {
+                "question": "Are all of the live shows recorded?",
+                "answer": "Yes, all live shows are recorded. You can access previous shows on our Youtube channel: https://www.youtube.com/@MaxOptionsTrading",
+                "sort_order": 1,
+            },
+            {
+                "question": "Where can I find Max's free beginner's course?",
+                "answer": "You can find Max's free beginner's course using this link:\nhttps://www.youtube.com/playlist?list=PLVPsZWsA_88QNfmWsBgOLrrYZZoLXBJVb",
+                "sort_order": 2,
+            },
+        ],
+    },
+    {
+        "name": "Tradeovate",
+        "sort_order": 11,
+        "entries": [
+            {
+                "question": "How do I set up my trade copier on Tradeovate?",
+                "answer": "Here is a YouTube video with Lama where he explains how to properly set up your Group Trading feature on Tradeovate:\nhttps://youtu.be/-1JRz8nC0sw?si=92LB6gljfPSXBkn2",
+                "sort_order": 0,
+            },
+        ],
+    },
+    {
+        "name": "Max Bucks",
+        "sort_order": 12,
+        "entries": [
+            {
+                "question": "What are Maxbucks?",
+                "answer": "Max Bucks are a reward-based digital currency earned through indicator subscriptions or by purchasing a course. As you accumulate Max Bucks, they can be redeemed toward free indicators or applied toward the purchase of a course. This program is simply our way of giving back and rewarding our customers for their continued support.",
+                "sort_order": 0,
+            },
+            {
+                "question": "How do I use Max Bucks?",
+                "answer": "MAX BUCKS can ONLY be applied to courses and indicators on our website. Cannot be used for private coaching sessions or any promos.",
+                "sort_order": 1,
+            },
+        ],
+    },
+    {
+        "name": "Affiliate",
+        "sort_order": 13,
+        "entries": [
+            {
+                "question": "How does the affiliate program work?",
+                "answer": "Yes, the affiliate $$ works on recurring indicator subscriptions and courses (excludes: coaching). You will receive affiliate $$ 30 days after the customer purchase. If the customer continues to subscribe the indicator you will continue to receive the affiliate $$$.",
+                "sort_order": 0,
+            },
+        ],
+    },
+]
+
+
+def seed_faqs():
+    """
+    Insert FAQ seed data into Postgres if faq_categories is empty.
+    Safe to call on every startup — exits immediately if already seeded.
+    To re-seed: run DELETE FROM faq_categories CASCADE; then restart.
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM faq_categories")
+                count = cur.fetchone()[0]
+                if count > 0:
+                    print(f"[FAQ] Already seeded ({count} categories). Skipping.")
+                    return
+                print("[FAQ] Seeding FAQ data from hardcoded seed...")
+                for cat in _FAQ_SEED:
+                    cur.execute("""
+                        INSERT INTO faq_categories (name, sort_order, active)
+                        VALUES (%s, %s, true)
+                        RETURNING id
+                    """, (cat["name"], cat["sort_order"]))
+                    cat_id = cur.fetchone()[0]
+                    for entry in cat.get("entries", []):
+                        cur.execute("""
+                            INSERT INTO faq_entries
+                                (category_id, question, answer, visibility, escalate, active, sort_order)
+                            VALUES (%s, %s, %s, 'public', %s, true, %s)
+                        """, (
+                            cat_id,
+                            entry["question"],
+                            entry["answer"],
+                            entry.get("escalate", False),
+                            entry["sort_order"],
+                        ))
+            conn.commit()
+        print("[FAQ] Seed complete.")
+    except Exception as e:
+        print(f"[FAQ ERROR] seed_faqs: {e}")
+
+
+# =========================
+# FAQ QUERY HELPERS
+# =========================
+
+def get_active_faq_categories() -> list[dict]:
+    """
+    Returns all active FAQ categories ordered by sort_order.
+    Each dict: { id, name, sort_order }
+    Used by: FaqCategoryView, /faq admin commands
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, name, sort_order
+                    FROM faq_categories
+                    WHERE active = true
+                    ORDER BY sort_order, name
+                """)
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[FAQ ERROR] get_active_faq_categories: {e}")
+        return []
+
+
+def get_faq_entries_by_category(category_id: int, visibility: str = "public") -> list[dict]:
+    """
+    Returns active FAQ entries for a category.
+    visibility: 'public' returns only public entries.
+                'all' returns both public and mod_only entries.
+    Each dict: { id, question, answer, escalate, visibility, sort_order }
+    Used by: FaqAnswerView (public flow), future mod FAQ viewer
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if visibility == "all":
+                    cur.execute("""
+                        SELECT id, question, answer, escalate, visibility, sort_order
+                        FROM faq_entries
+                        WHERE category_id = %s AND active = true
+                        ORDER BY sort_order
+                    """, (category_id,))
+                else:
+                    cur.execute("""
+                        SELECT id, question, answer, escalate, visibility, sort_order
+                        FROM faq_entries
+                        WHERE category_id = %s AND active = true AND visibility = 'public'
+                        ORDER BY sort_order
+                    """, (category_id,))
+                return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        print(f"[FAQ ERROR] get_faq_entries_by_category: {e}")
+        return []
+
+
+def get_faq_entry_by_id(entry_id: int) -> dict | None:
+    """
+    Returns a single FAQ entry by primary key.
+    Used by: future mod send-FAQ-to-ticket flow, admin edit/delete
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, category_id, question, answer, escalate, visibility, active, sort_order
+                    FROM faq_entries
+                    WHERE id = %s
+                """, (entry_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        print(f"[FAQ ERROR] get_faq_entry_by_id: {e}")
+        return None
+
+
+def get_faq_category_by_id(category_id: int) -> dict | None:
+    """
+    Returns a single FAQ category by primary key.
+    Used by: future admin edit/delete commands
+    """
+    try:
+        with get_db() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, name, sort_order, active
+                    FROM faq_categories
+                    WHERE id = %s
+                """, (category_id,))
+                row = cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        print(f"[FAQ ERROR] get_faq_category_by_id: {e}")
+        return None
 
 
 # =========================
@@ -1359,287 +1896,45 @@ class OldPrizePickView(discord.ui.View):
 
 
 # =========================
-# FAQ DATA
+# FAQ VIEWS  (reads from Postgres)
 # =========================
-FAQ_DATA: dict[str, list[dict[str, str]]] = {
-    "TradingView": [
-        {
-            "q": "How do I link my TradingView username?",
-            "a": "Your TradingView account is linked directly from the top-right corner of the Dashboard. You only need to do this one time. Once your TradingView username is connected, indicator access will be granted automatically to that account."
-        },
-        {
-            "q": "Indicator missing on TradingView?",
-            "a": "If your indicator isn't showing up on TradingView, first make sure your TradingView username is linked in your Dashboard. Indicator access is granted to the username you provide. If it's already linked and you still don't see it, try refreshing TradingView or use the chat assistant to run an access check. If you are still having issues, disconnect your TradingView from the website and reconnect it."
-        },
-        {
-            "q": "I linked the wrong TradingView username. How do I fix it?",
-            "a": "Go to your Dashboard and update your TradingView username in the top-right corner. Once updated, access will automatically transfer to the correct account. If you still experience issues, describe the problem in this ticket and a moderator will assist you."
-        },
-        {
-            "q": "Can I use the indicators on multiple TradingView accounts?",
-            "a": "Indicator access is granted to one TradingView username per subscription. If you need access on a different account, you must update your username in the Dashboard."
-        },
-    ],
-    "Discord": [
-        {
-            "q": "How do I link my Discord account?",
-            "a": "Your Discord account is linked directly from the top-right corner of the Dashboard. You only need to do this one time. Once connected, your Discord roles and access will sync automatically based on your active subscription."
-        },
-        {
-            "q": "Having trouble seeing Discord channels?",
-            "a": "If you can't see certain Discord channels, make sure your Discord account is linked in your Dashboard. Once connected, your roles sync automatically based on your active purchases. If you've already linked your Discord and still don't have access, a moderator has been notified and will assist you shortly.",
-            "escalate": True
-        },
-        {
-            "q": "Why can't I type in the Discord chats?",
-            "a": "This is because you haven't completed the email verification process. While you are in the discord find the channel / section towards the top that says 'Start Here' click it. Next you'll see a drop down with different options, select '#Step Three'. You'll see a blue button that says 'Start email verification'. Complete this and you will now be able to type in the chats."
-        },
-        {
-            "q": "Is the community active every day?",
-            "a": "Yes. The Discord community is active daily with market discussion, trade breakdowns, live shows, and member interaction. You're never trading alone — there's always structure, support, and FUN."
-        },
-        {
-            "q": "What happens if I am banned from the Discord?",
-            "a": "If you are banned from our Discord community, the ban is final and non-negotiable. Our moderation team enforces community guidelines to maintain a respectful and productive environment for all members. As such, banned users will not be reinstated and appeals will not be considered."
-        },
-    ],
-    "Billing": [
-        {
-            "q": "How do I upgrade my subscription?",
-            "a": "All subscription changes are handled in the Manage Billing section of the Dashboard. Navigate to Dashboard → Billing → Manage Billing to upgrade your subscription at any time."
-        },
-        {
-            "q": "How do I cancel my subscription?",
-            "a": "You can cancel your subscription from the Manage Billing section of the Dashboard. Go to Dashboard → Billing → Manage Billing, where you can cancel your subscription directly."
-        },
-        {
-            "q": "Do you offer refunds?",
-            "a": "Due to the digital nature of our products (indicators, courses, and community access), all purchases are final. If you believe there has been a billing error, a moderator has been notified and will assist you shortly.",
-            "escalate": True
-        },
-        {
-            "q": "What do I do if I was charged twice for an indicator subscription?",
-            "a": "A moderator has been notified and will assist you shortly.",
-            "escalate": True
-        },
-    ],
-    "Indicators": [
-        {
-            "q": "Help me pick the right indicator(s)",
-            "a": "We offer powerful trading indicators designed for different trading styles — from scalping to swing trading. Each indicator has unique features to help you spot opportunities in the market. Visit our Indicators page to browse the full collection and find the perfect fit for your strategy: https://www.maxoptionstrading.com/indicators"
-        },
-        {
-            "q": "What indicator(s) do you recommend?",
-            "a": "All of our MOT indicators are great! The best part is that you can mix and match them together for additional confluence. https://www.maxoptionstrading.com/indicators"
-        },
-        {
-            "q": "What markets do your indicators work on?",
-            "a": "Our indicators are designed to work across multiple markets including stocks, options, futures, and crypto. Many members use them for intraday trading as well as swing trading strategies."
-        },
-        {
-            "q": "Are the indicators beginner-friendly?",
-            "a": "Yes! Our indicators are built to be powerful yet easy to understand. We also provide tutorials, live examples during shows, and community support to help you learn how to use them effectively."
-        },
-        {
-            "q": "What makes your indicators different?",
-            "a": "Our indicators are built from real trading experience — not theory. They're designed to simplify decision-making, improve timing, and help you trade with confidence. Many members combine them for added confluence and stronger setups. You'll also see them used live during our shows so you can learn exactly how to apply them in real time."
-        },
-        {
-            "q": "My Discord role is not showing up after purchasing an indicator.",
-            "a": "On the website remove your discord access, then reconnect your discord to the website and your role will be available."
-        },
-    ],
-    "Courses": [
-        {
-            "q": "Can you please help me pick a course?",
-            "a": "Our courses are designed to take you from beginner to advanced trader. Whether you're just starting out or looking to refine your strategy, we have courses covering everything from the basics to advanced techniques. Visit our Courses page to explore what's available: https://www.maxoptionstrading.com/courses (also check out the testimonials posted on trustpilot: https://www.trustpilot.com/review/www.maxoptionstrading.com)"
-        },
-        {
-            "q": "How do I transfer my WHOP purchases to the website?",
-            "a": "A moderator has been notified and will assist you shortly with a redemption code.",
-            "escalate": True
-        },
-        {
-            "q": "My Discord role is not showing up after purchasing the course.",
-            "a": "On the website remove your discord access, then connect your discord back to the website and your roles will be available."
-        },
-        {
-            "q": "I have issues watching the course content.",
-            "a": "To ensure videos play properly, please follow these recommendations:\n\nAlways use the latest version of both your operating system and browser for best compatibility.\n\nDesktop (Windows/Mac):\n- Latest version of Chrome or Firefox is recommended.\n- Edge (v129 or later) is supported on Windows 10+.\n- Safari works if FairPlay DRM is integrated.\n\nAndroid (Phone/Tablet/Chromebook):\n- Latest version of Chrome (Android 5+).\n- If Chrome does not work, try the latest version of Firefox or Edge.\n\niOS (iPhone/iPad):\n- Updated Safari is recommended.\n- iOS 11.2 or later is required.\n- Chrome may work on newer iOS versions, but Safari is the most reliable option.\n\nIf the recommended options above don't work, it may also require that you clear your cache."
-        },
-    ],
-    "Live Shows": [
-        {
-            "q": "What time are the live shows?",
-            "a": "We have three daily live shows:\n\nBig Daddy Morning Show — Daily from 9:30 AM to 11:30 AM EST (Mon-Fri)\nPower Hour Special — Daily from 2:45 PM to 4:15 PM EST (Mon-Fri)\nHappy Hour — Daily from 5:45pm to 7:45pm EST (Sun-Thur)\n\nVisit the MOT Network to watch the shows live or catch up on previous shows posted on our Youtube channel: https://www.youtube.com/@MaxOptionsTrading"
-        },
-        {
-            "q": "Are all of the live shows recorded?",
-            "a": "Yes, all live shows are recorded. You can access previous shows on our Youtube channel: https://www.youtube.com/@MaxOptionsTrading"
-        },
-        {
-            "q": "When does 'Traders and Haters' podcast go live?",
-            "a": "Traders and Haters podcast is recorded every Tuesday evening at 5pm EST. The show gets edited, and posted on Youtube the following Monday evening."
-        },
-        {
-            "q": "How do I access the live shows?",
-            "a": "Live shows are streamed inside the Discord community and on the MOT Network. Make sure your Discord account is linked and your subscription is active to access member-only streams."
-        },
-        {
-            "q": "How often do you do hit bangers like this?",
-            "a": "EVERY. F-ING. DAY."
-        },
-    ],
-    "General": [
-        {
-            "q": "How do I get the MOT tag?",
-            "a": "On a computer: Click on the MOT tag next someone's name in the discord and click Adopt tag, or:\n- Click on the server name in the upper menu on Discord\n- Go to server tag\n- Adopt the MOT tag\n\nOn a mobile device:\n- Go to profile\n- Edit profile\n- Go to server/guild tag\n- Choose the MOT tag and save"
-        },
-        {
-            "q": "How do I enter in Giveaways?",
-            "a": "General rules for giveaways in our discord:\n1. You must be a verified member in our server.\n2. Get the MOT tag in order to be eligible.\n3. Join the live tradings or podcast to get randomly picked."
-        },
-        {
-            "q": "I previously won an account through MOT. How do I qualify for the 'double up' program?",
-            "a": "A moderator has been notified and will assist you shortly.\n\nTo qualify, please have the following ready:\n1) A screenshot of the evaluation account we gave you\n2) A screenshot of the funded account\n3) A screenshot of a payout",
-            "escalate": True
-        },
-        {
-            "q": "How long does it take for my access to activate?",
-            "a": "Access is typically granted instantly after your purchase is completed. If you don't see your Discord roles or TradingView indicators within a few minutes, try logging out and back in to your Dashboard. If the issue continues, a moderator has been notified and will assist you shortly.",
-            "escalate": True
-        },
-        {
-            "q": "What platform do you recommend for trading?",
-            "a": "Many of our members trade using platforms like TradingView for charting and Tradeovate for futures execution. However, you can use any broker or platform that fits your trading style."
-        },
-        {
-            "q": "Is this community suitable for beginners?",
-            "a": "Absolutely. We have traders at all experience levels — from complete beginners to funded prop firm traders. Our courses, live breakdowns, and coaching options are designed to help you grow at every stage."
-        },
-        {
-            "q": "Do you offer a free trial?",
-            "a": "At this time, we do not offer free trials. However, we provide free educational content on our YouTube channel so you can see our strategies and teaching style before purchasing."
-        },
-        {
-            "q": "What happens after I subscribe?",
-            "a": "Immediately after subscribing:\n1. Link your Discord and TradingView accounts in your Dashboard\n2. Your roles and indicator access sync automatically\n3. Jump into the live sessions and start learning"
-        },
-        {
-            "q": "Is this just for options traders?",
-            "a": "No. Our strategies and indicators are used for futures, stocks, options, and even crypto. The principles we teach — structure, momentum, liquidity, and risk management — apply across markets."
-        },
-        {
-            "q": "What if I don't have much time to trade?",
-            "a": "We offer multiple live sessions throughout the day, plus recorded content. Whether you trade full-time or part-time, you can plug into the sessions that fit your schedule and review recordings when needed."
-        },
-        {
-            "q": "Can I actually become profitable using your system?",
-            "a": "Profitability depends on discipline and execution — but we give you the tools, structure, and mentorship to dramatically shorten your learning curve. Members who commit, follow the system, and manage risk properly see the biggest improvements."
-        },
-        {
-            "q": "Why should I join Max Options Trading?",
-            "a": "We don't just live trade — we're education + entertainment + execution + accountability.\nInside Max Options Trading, you get live breakdowns, proven indicators, structured courses, and a serious community of traders focused on consistency.\nOur goal isn't hype — it's helping you build real, repeatable skills."
-        },
-    ],
-    "Prop Firms": [
-        {
-            "q": "Which prop firms do you recommend?",
-            "a": "We've partnered with top-tier prop firms that we personally trust and use. These are vetted trading firms that offer great funding opportunities for serious traders. Check out our Partners page to see our recommended prop firms: https://www.maxoptionstrading.com/partners"
-        },
-        {
-            "q": "I've failed prop firm challenges before. Can this help?",
-            "a": "Yes. Many members join specifically to improve their evaluation performance. We focus heavily on discipline, risk management, and high-probability setups — which are critical for passing and maintaining funded accounts."
-        },
-    ],
-    "Coaching": [
-        {
-            "q": "How can I book a trading coach?",
-            "a": "Looking for personalized guidance? Our verified trading coaches offer 1-on-1 mentorship sessions to help you level up your trading game. Get personalized feedback, strategy reviews, and accelerate your learning. Visit our Coaching page to browse available coaches and book a session: https://www.maxoptionstrading.com/coaching"
-        },
-    ],
-    "WealthCharts": [
-        {
-            "q": "How do I set up Wealthcharts for trading futures?",
-            "a": "Check out this how to video that Max made on this! https://youtu.be/BWwowJY_cho?si=2oZtFwIKUYQa3fuB"
-        },
-        {
-            "q": "How do I link my indicators to WealthCharts?",
-            "a": "https://scribehow.com/viewer/How_to_link_your_indicator_to_WealthCharts_on_the_MOT_website__ctDUpjC4R4anyEZYQvfAiw"
-        },
-        {
-            "q": "Where do I find my indicators on WealthCharts?",
-            "a": "https://scribehow.com/embed-preview/How_to_Access_MOT_Indicators_on_Wealthcharts__rrasDmTlT62JUoKS_Ju-wg?as=slides&size=flexible"
-        },
-    ],
-    "YouTube": [
-        {
-            "q": "Where can I find free content about ORB?",
-            "a": "Take advantage of all free content around ORB on Max Options trading on YouTube, starting with: https://www.youtube.com/watch?v=SunW-hRFGzY"
-        },
-        {
-            "q": "Are all of the live shows recorded?",
-            "a": "Yes, all live shows are recorded. You can access previous shows on our Youtube channel: https://www.youtube.com/@MaxOptionsTrading"
-        },
-        {
-            "q": "Where can I find Max's free beginner's course?",
-            "a": "You can find Max's free beginner's course using this link:\nhttps://www.youtube.com/playlist?list=PLVPsZWsA_88QNfmWsBgOLrrYZZoLXBJVb"
-        },
-    ],
-    "Tradeovate": [
-        {
-            "q": "How do I set up my trade copier on Tradeovate?",
-            "a": "Here is a YouTube video with Lama where he explains how to properly set up your Group Trading feature on Tradeovate:\nhttps://youtu.be/-1JRz8nC0sw?si=92LB6gljfPSXBkn2"
-        },
-    ],
-    "Max Bucks": [
-        {
-            "q": "What are Maxbucks?",
-            "a": "Max Bucks are a reward-based digital currency earned through indicator subscriptions or by purchasing a course. As you accumulate Max Bucks, they can be redeemed toward free indicators or applied toward the purchase of a course. This program is simply our way of giving back and rewarding our customers for their continued support."
-        },
-        {
-            "q": "How do I use Max Bucks?",
-            "a": "MAX BUCKS can ONLY be applied to courses and indicators on our website. Cannot be used for private coaching sessions or any promos."
-        },
-    ],
-    "Affiliate": [
-        {
-            "q": "How does the affiliate program work?",
-            "a": "Yes, the affiliate $$ works on recurring indicator subscriptions and courses (excludes: coaching). You will receive affiliate $$ 30 days after the customer purchase. If the customer continues to subscribe the indicator you will continue to receive the affiliate $$$."
-        },
-    ],
-}
-
-FAQ_CATEGORIES = list(FAQ_DATA.keys())
-
 
 class FaqAnswerView(discord.ui.View):
-    def __init__(self, category: str):
+    """
+    Shown after a user clicks a category button.
+    Loads question buttons from Postgres for that category.
+    visibility='public'  → user-facing (ephemeral answer only)
+    visibility='all'     → mod-facing (future: send-to-channel option)
+    """
+    def __init__(self, category_id: int, category_name: str, visibility: str = "public"):
         super().__init__(timeout=120)
-        faqs = FAQ_DATA.get(category, [])
-        for i, faq in enumerate(faqs[:25]):
-            label = faq["q"][:80]
+        entries = get_faq_entries_by_category(category_id, visibility=visibility)
+        for i, entry in enumerate(entries[:25]):
+            label = entry["question"][:80]
             self.add_item(FaqQuestionButton(
                 label=label,
-                answer=faq["a"],
-                escalate=faq.get("escalate", False),
+                entry_id=entry["id"],
+                answer=entry["answer"],
+                escalate=entry["escalate"],
                 index=i
             ))
 
 
 class FaqQuestionButton(discord.ui.Button):
-    def __init__(self, label: str, answer: str, escalate: bool, index: int):
+    def __init__(self, label: str, entry_id: int, answer: str, escalate: bool, index: int):
         super().__init__(
             label=label,
             style=discord.ButtonStyle.danger if escalate else discord.ButtonStyle.secondary,
             row=min(index // 5, 4)
         )
+        self.entry_id = entry_id
         self.answer = answer
         self.escalate = escalate
 
     async def callback(self, interaction: discord.Interaction):
-        answer = self.answer[:2000]
-        await interaction.response.send_message(answer, ephemeral=True)
+        # Always ephemeral — user sees the answer only for themselves
+        await interaction.response.send_message(self.answer[:2000], ephemeral=True)
+
         if self.escalate:
             channel = interaction.channel
             guild = interaction.guild
@@ -1789,25 +2084,40 @@ class ClaimPrizeButton(discord.ui.Button):
 
 
 class FaqCategoryView(discord.ui.View):
+    """
+    The main FAQ embed sent into every new support ticket.
+    Loads category list from Postgres. custom_id format preserved for open ticket compatibility.
+    """
     def __init__(self):
         super().__init__(timeout=None)
-        for i, cat in enumerate(FAQ_CATEGORIES[:20]):
-            self.add_item(FaqCategoryButton(label=cat, index=i))
+        categories = get_active_faq_categories()
+        for i, cat in enumerate(categories[:20]):
+            self.add_item(FaqCategoryButton(
+                label=cat["name"],
+                category_id=cat["id"],
+                index=i
+            ))
         self.add_item(NeedHelpButton())
         self.add_item(ClaimPrizeButton())
 
 
 class FaqCategoryButton(discord.ui.Button):
-    def __init__(self, label: str, index: int):
+    """
+    One button per FAQ category. custom_id uses category name (lowercase/underscored)
+    to stay compatible with buttons already rendered in open tickets.
+    """
+    def __init__(self, label: str, category_id: int, index: int):
         super().__init__(
             label=label,
             style=discord.ButtonStyle.primary,
+            # Keep same custom_id format as before so old ticket buttons still work
             custom_id=f"faq_cat_{label.lower().replace(' ', '_')}",
             row=min(index // 5, 3)
         )
+        self.category_id = category_id
 
     async def callback(self, interaction: discord.Interaction):
-        view = FaqAnswerView(category=self.label)
+        view = FaqAnswerView(category_id=self.category_id, category_name=self.label)
         await interaction.response.send_message(
             f"**{self.label} FAQs** — click a question to see the answer:",
             view=view,
@@ -2053,10 +2363,10 @@ async def ensure_support_panel():
 # =========================
 class GiveawayBot(commands.Bot):
     async def setup_hook(self):
-        init_db()
         self.add_view(GiveawayTicketControls())
         self.add_view(SupportTicketControls())
         self.add_view(OpenSupportTicketView())
+        self.add_view(FaqCategoryView())
         self.loop.create_task(self._safe_ensure_support_panel())
         self.loop.create_task(self._cleanup_loop())
 
@@ -2110,7 +2420,6 @@ tree = bot.tree
 # AUTOCOMPLETE
 # =========================
 async def prop_firm_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    # Unknown Prize always appears first if it matches the current input
     choices = []
     if current.lower() in "unknown prize":
         choices.append(app_commands.Choice(name="Unknown Prize", value="Unknown Prize"))
@@ -2131,7 +2440,6 @@ async def show_autocomplete(interaction: discord.Interaction, current: str) -> l
     ][:25]
 
 
-# Single-field autocomplete (used by /win, /yt, /track)
 async def account_type_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     prop_firm = interaction.namespace.prop_firm or ""
     if not prop_firm or is_unknown_prize(prop_firm):
@@ -2157,7 +2465,6 @@ async def account_size_autocomplete(interaction: discord.Interaction, current: s
     ][:25]
 
 
-# Numbered autocomplete (used by /multi and /ytmulti)
 async def account_type_autocomplete_1(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     prop_firm = interaction.namespace.prop_firm_1 or ""
     if not prop_firm or is_unknown_prize(prop_firm):
@@ -2213,11 +2520,6 @@ async def account_size_autocomplete_3(interaction: discord.Interaction, current:
 # PRIZE RESOLUTION HELPER
 # =========================
 def resolve_prize(prop_firm: str, account_type: str, account_size: str) -> tuple[dict | None, str | None]:
-    """
-    Returns (resolved_dict, error_message).
-    For Unknown Prize, returns a safe stub dict with no catalog IDs.
-    For normal prizes, resolves from catalog or returns None with an error.
-    """
     if is_unknown_prize(prop_firm):
         return make_unknown_resolved(), None
     resolved = resolve_prize_from_catalog(prop_firm, account_type, account_size)
@@ -3168,6 +3470,7 @@ async def stats(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     try:
+        init_db()
         await tree.sync(guild=discord.Object(id=GUILD_ID))
         print(f"Logged in as {bot.user}")
         print("Slash commands synced.")
