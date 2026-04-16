@@ -1898,71 +1898,67 @@ class OldPrizePickView(discord.ui.View):
 # FAQ VIEWS — MOD (send to channel)
 # =========================
 
-class ModFaqCategoryView(discord.ui.View):
-    """Ephemeral category picker for the mod FAQ Tools button."""
+class ModFaqCategorySelect(discord.ui.Select):
     def __init__(self):
-        super().__init__(timeout=120)
         categories = get_active_faq_categories()
-        for i, cat in enumerate(categories[:20]):
-            self.add_item(ModFaqCategoryButton(
-                label=cat["name"],
-                category_id=cat["id"],
-                index=i
-            ))
+        options = [
+            discord.SelectOption(label=c["name"], value=str(c["id"]))
+            for c in categories[:25]
+        ]
+        super().__init__(placeholder="Select a category...", min_values=1, max_values=1, options=options)
 
-
-class ModFaqCategoryButton(discord.ui.Button):
-    def __init__(self, label: str, category_id: int, index: int):
-        super().__init__(
-            label=label,
-            style=discord.ButtonStyle.primary,
-            row=min(index // 5, 3)
-        )
-        self.category_id = category_id
-
-async def callback(self, interaction: discord.Interaction):
-        view = ModFaqAnswerView(category_id=self.category_id, category_name=self.label)
+    async def callback(self, interaction: discord.Interaction):
+        category_id = int(self.values[0])
+        category_name = next(o.label for o in self.options if o.value == self.values[0])
+        entries = get_faq_entries_by_category(category_id, visibility="public")
+        if not entries:
+            await interaction.response.edit_message(
+                content="❌ No entries in that category.", view=None
+            )
+            return
+        view = ModFaqQuestionView(entries=entries)
         await interaction.response.edit_message(
-            content=f"**{self.label} FAQs** — click a question to send it to the ticket:",
+            content=f"**{category_name}** — select a question to send to the ticket:",
             view=view
         )
 
-class ModFaqAnswerView(discord.ui.View):
-    """Ephemeral question picker for mods. Clicking sends the answer publicly."""
-    def __init__(self, category_id: int, category_name: str):
+
+class ModFaqCategoryView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=120)
-        entries = get_faq_entries_by_category(category_id, visibility="public")
-        for i, entry in enumerate(entries[:25]):
-            label = entry["question"][:80]
-            self.add_item(ModFaqSendButton(
-                label=label,
-                question=entry["question"],
-                answer=entry["answer"],
-                index=i
-            ))
+        self.add_item(ModFaqCategorySelect())
 
 
-class ModFaqSendButton(discord.ui.Button):
-    """Mod clicks → answer posts publicly as bold question + answer."""
-    def __init__(self, label: str, question: str, answer: str, index: int):
-        super().__init__(
-            label=label,
-            style=discord.ButtonStyle.secondary,
-            row=min(index // 5, 4)
-        )
-        self.question = question
-        self.answer = answer
+class ModFaqQuestionSelect(discord.ui.Select):
+    def __init__(self, entries: list[dict]):
+        options = [
+            discord.SelectOption(
+                label=e["question"][:100],
+                value=str(e["id"]),
+                description=e["answer"][:50] + "..." if len(e["answer"]) > 50 else e["answer"]
+            )
+            for e in entries[:25]
+        ]
+        super().__init__(placeholder="Select a question to send...", min_values=1, max_values=1, options=options)
+        self.entries = {str(e["id"]): e for e in entries}
 
     async def callback(self, interaction: discord.Interaction):
         if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
-            await interaction.response.send_message("❌ Only mods can send FAQs to the ticket.", ephemeral=True)
+            await interaction.response.send_message("❌ Only mods can send FAQs.", ephemeral=True)
             return
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel):
             await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
             return
-        message_content = f"**{self.question}**\n\n{self.answer}"
-        await interaction.response.defer(thinking=False)
+        entry = self.entries.get(self.values[0])
+        if not entry:
+            await interaction.response.send_message("❌ Entry not found.", ephemeral=True)
+            return
+        message_content = f"**{entry['question']}**\n\n{entry['answer']}"
+        await interaction.response.edit_message(
+            content=f"✅ Sent **{entry['question'][:60]}** to the ticket.",
+            view=None
+        )
         if len(message_content) <= 2000:
             await channel.send(message_content)
         else:
@@ -1971,10 +1967,12 @@ class ModFaqSendButton(discord.ui.Button):
             while remaining:
                 await channel.send(remaining[:2000])
                 remaining = remaining[2000:]
-        await interaction.followup.send(
-            content=f"✅ Sent **{self.question[:60]}** to the ticket.",
-            ephemeral=True
-        )
+
+
+class ModFaqQuestionView(discord.ui.View):
+    def __init__(self, entries: list[dict]):
+        super().__init__(timeout=120)
+        self.add_item(ModFaqQuestionSelect(entries=entries))
 
     
 # =========================
@@ -2328,9 +2326,10 @@ class SupportTicketControls(discord.ui.View):
         if user_is_mod(interaction.user):
             view = ModFaqCategoryView()
             await interaction.response.send_message(
-                "📋 **FAQ Tools** — Select a category, then click a question to send it to this ticket:",
+                "📋 **FAQ Tools** — Select a category, then select a question to send it to this ticket:",
                 view=view,
                 ephemeral=True
+            )
             )
         else:
             view = FaqCategoryView()
