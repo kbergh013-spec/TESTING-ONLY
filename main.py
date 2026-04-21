@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-print("RUNNING VERSION: structured-prizes-8-faq-admin")
+print("RUNNING VERSION: structured-prizes-8-faq-admin-sequential-tickets")
 
 # =========================
 # ENV / SECRETS
@@ -190,9 +190,20 @@ def init_db():
             """)
 
             # -------------------------
+            # NEW: Ticket number sequence and column
+            # -------------------------
+            # Sequence starts at 13001 — safe to run every startup (IF NOT EXISTS)
+            cur.execute("""
+                CREATE SEQUENCE IF NOT EXISTS ticket_number_seq START 13001
+            """)
+            # Add ticket_number column to winners if it doesn't exist yet
+            cur.execute("""
+                ALTER TABLE winners ADD COLUMN IF NOT EXISTS ticket_number INTEGER
+            """)
+
+            # -------------------------
             # FAQ TABLES
             # -------------------------
-            # faq_categories: one row per category (TradingView, Discord, Billing, etc.)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS faq_categories (
                     id SERIAL PRIMARY KEY,
@@ -205,7 +216,6 @@ def init_db():
                     updated_by_discord_id TEXT
                 )
             """)
-            # faq_entries: one row per question/answer pair
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS faq_entries (
                     id SERIAL PRIMARY KEY,
@@ -231,9 +241,6 @@ def init_db():
 # =========================
 # FAQ SEED DATA
 # =========================
-# This runs once on startup. If faq_categories already has rows, it exits immediately.
-# To re-seed: DELETE FROM faq_categories; (cascade deletes entries too)
-
 _FAQ_SEED: list[dict] = [
     {
         "name": "TradingView",
@@ -594,11 +601,6 @@ _FAQ_SEED: list[dict] = [
 
 
 def seed_faqs():
-    """
-    Insert FAQ seed data into Postgres if faq_categories is empty.
-    Safe to call on every startup — exits immediately if already seeded.
-    To re-seed: run DELETE FROM faq_categories CASCADE; then restart.
-    """
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -638,11 +640,6 @@ def seed_faqs():
 # =========================
 
 def get_active_faq_categories() -> list[dict]:
-    """
-    Returns all active FAQ categories ordered by sort_order.
-    Each dict: { id, name, sort_order }
-    Used by: FaqCategoryView, /faq admin commands
-    """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -659,13 +656,6 @@ def get_active_faq_categories() -> list[dict]:
 
 
 def get_faq_entries_by_category(category_id: int, visibility: str = "public") -> list[dict]:
-    """
-    Returns active FAQ entries for a category.
-    visibility: 'public' returns only public entries.
-                'all' returns both public and mod_only entries.
-    Each dict: { id, question, answer, escalate, visibility, sort_order }
-    Used by: FaqAnswerView (public flow), future mod FAQ viewer
-    """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -690,10 +680,6 @@ def get_faq_entries_by_category(category_id: int, visibility: str = "public") ->
 
 
 def get_faq_entry_by_id(entry_id: int) -> dict | None:
-    """
-    Returns a single FAQ entry by primary key.
-    Used by: future mod send-FAQ-to-ticket flow, admin edit/delete
-    """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -710,10 +696,6 @@ def get_faq_entry_by_id(entry_id: int) -> dict | None:
 
 
 def get_faq_category_by_id(category_id: int) -> dict | None:
-    """
-    Returns a single FAQ category by primary key.
-    Used by: future admin edit/delete commands
-    """
     try:
         with get_db() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -925,6 +907,7 @@ def _row_to_entry(row: dict) -> dict:
         "prop_firm_id": row.get("prop_firm_id"),
         "account_type_id": row.get("account_type_id"),
         "account_size_id": row.get("account_size_id"),
+        "ticket_number": row.get("ticket_number"),  # NEW
     }
 
 
@@ -998,10 +981,11 @@ def save_data(data: dict):
                                 reason, notes, ticket_channel_id, ticket_channel_name,
                                 backend_message_id, prompt_message_id, header_message_id,
                                 updated_at, updated_by, updated_by_id, completed_at, history,
-                                prize_catalog_id, prop_firm_id, account_type_id, account_size_id
+                                prize_catalog_id, prop_firm_id, account_type_id, account_size_id,
+                                ticket_number
                             ) VALUES (
                                 %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+                                %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
                             )
                         """, (
                             entry.get("bundle_id"),
@@ -1034,6 +1018,7 @@ def save_data(data: dict):
                             entry.get("prop_firm_id"),
                             entry.get("account_type_id"),
                             entry.get("account_size_id"),
+                            entry.get("ticket_number"),  # NEW
                         ))
             conn.commit()
     except Exception as e:
@@ -1153,6 +1138,29 @@ def fetch_transcript_messages(transcript_id: int) -> dict:
 # =========================
 # UTILS
 # =========================
+
+# NEW: Draw the next ticket number from the Postgres sequence.
+# Postgres sequences are atomic — concurrent calls always get unique values,
+# even if two tickets are created at exactly the same moment.
+def next_ticket_number() -> int:
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT nextval('ticket_number_seq')")
+            return cur.fetchone()[0]
+
+
+# NEW: Sanitize a Discord username for use in a channel name.
+# Result is lowercase, spaces become hyphens, only a-z/0-9/-/_ kept,
+# trimmed to max_len, and leading/trailing hyphens stripped.
+def sanitize_username_for_channel(user_name: str, max_len: int = 20) -> str:
+    name = user_name.lower().replace(" ", "-")
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789-_"
+    name = "".join(c for c in name if c in allowed)
+    name = name.strip("-")
+    return name[:max_len] or "user"
+
+
+# Kept unchanged — used by giveaway/winner channels only
 def safe_channel_name(prefix: str, user_name: str, label: str = "") -> str:
     parts = [prefix, user_name]
     if label:
@@ -1162,6 +1170,30 @@ def safe_channel_name(prefix: str, user_name: str, label: str = "") -> str:
     allowed = "abcdefghijklmnopqrstuvwxyz0123456789-_"
     cleaned = "".join(c for c in base if c in allowed)
     return cleaned[:90]
+
+
+# NEW: Updated to also recognise the new sequential format (e.g. 13001-username
+# and closed-13001-username) without breaking old support-/manual-/prize- prefixes.
+def is_support_ticket_channel(channel: discord.abc.GuildChannel) -> bool:
+    if not isinstance(channel, discord.TextChannel):
+        return False
+    if channel.category_id != SUPPORT_CATEGORY_ID:
+        return False
+    name = channel.name
+    # Strip closed- prefix before checking format
+    check_name = name[len("closed-"):] if name.startswith("closed-") else name
+    # New sequential format: starts with a digit (e.g. 13001-username)
+    if check_name and check_name[0].isdigit():
+        return True
+    # Legacy formats
+    return (
+        name.startswith("support-") or
+        name.startswith("closed-support-") or
+        name.startswith("manual-") or
+        name.startswith("closed-manual-") or
+        name.startswith("prize-") or
+        name.startswith("closed-prize-")
+    )
 
 
 def is_giveaway_ticket_channel(channel: discord.abc.GuildChannel) -> bool:
@@ -1178,21 +1210,6 @@ def is_manual_ticket_channel(channel: discord.abc.GuildChannel) -> bool:
     if channel.category_id != SUPPORT_CATEGORY_ID:
         return False
     return channel.name.startswith("manual-") or channel.name.startswith("closed-manual-")
-
-
-def is_support_ticket_channel(channel: discord.abc.GuildChannel) -> bool:
-    if not isinstance(channel, discord.TextChannel):
-        return False
-    if channel.category_id != SUPPORT_CATEGORY_ID:
-        return False
-    return (
-        channel.name.startswith("support-") or
-        channel.name.startswith("closed-support-") or
-        channel.name.startswith("manual-") or
-        channel.name.startswith("closed-manual-") or
-        channel.name.startswith("prize-") or
-        channel.name.startswith("closed-prize-")
-    )
 
 
 def is_bot_ticket_channel(channel: discord.abc.GuildChannel) -> bool:
@@ -1869,7 +1886,8 @@ class GiveawayTicketControls(discord.ui.View):
                 "Select which prize to replace:",
                 view=view,
                 ephemeral=True
-            )   
+            )
+
 
 class OldPrizePickSelect(discord.ui.Select):
     def __init__(self, old_prizes: list[str]):
@@ -1894,7 +1912,8 @@ class OldPrizePickView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(OldPrizePickSelect(old_prizes=old_prizes))
 
- # =========================
+
+# =========================
 # FAQ VIEWS — MOD (send to channel)
 # =========================
 
@@ -1974,18 +1993,12 @@ class ModFaqQuestionView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(ModFaqQuestionSelect(entries=entries))
 
-    
+
 # =========================
-# FAQ VIEWS  (reads from Postgres)
+# FAQ VIEWS (reads from Postgres)
 # =========================
 
 class FaqAnswerView(discord.ui.View):
-    """
-    Shown after a user clicks a category button.
-    Loads question buttons from Postgres for that category.
-    visibility='public'  → user-facing (ephemeral answer only)
-    visibility='all'     → mod-facing (future: send-to-channel option)
-    """
     def __init__(self, category_id: int, category_name: str, visibility: str = "public"):
         super().__init__(timeout=120)
         entries = get_faq_entries_by_category(category_id, visibility=visibility)
@@ -2012,9 +2025,7 @@ class FaqQuestionButton(discord.ui.Button):
         self.escalate = escalate
 
     async def callback(self, interaction: discord.Interaction):
-        # Always ephemeral — user sees the answer only for themselves
         await interaction.response.send_message(self.answer[:2000], ephemeral=True)
-
         if self.escalate:
             channel = interaction.channel
             guild = interaction.guild
@@ -2164,10 +2175,6 @@ class ClaimPrizeButton(discord.ui.Button):
 
 
 class FaqCategoryView(discord.ui.View):
-    """
-    The main FAQ embed sent into every new support ticket.
-    Loads category list from Postgres. custom_id format preserved for open ticket compatibility.
-    """
     def __init__(self):
         super().__init__(timeout=None)
         categories = get_active_faq_categories()
@@ -2182,15 +2189,10 @@ class FaqCategoryView(discord.ui.View):
 
 
 class FaqCategoryButton(discord.ui.Button):
-    """
-    One button per FAQ category. custom_id uses category name (lowercase/underscored)
-    to stay compatible with buttons already rendered in open tickets.
-    """
     def __init__(self, label: str, category_id: int, index: int):
         super().__init__(
             label=label,
             style=discord.ButtonStyle.primary,
-            # Keep same custom_id format as before so old ticket buttons still work
             custom_id=f"faq_cat_{label.lower().replace(' ', '_')}",
             row=min(index // 5, 3)
         )
@@ -2318,6 +2320,7 @@ class SupportTicketControls(discord.ui.View):
             ephemeral=True,
             view=SupportDeleteConfirmView()
         )
+
     @discord.ui.button(label="FAQ Tools", style=discord.ButtonStyle.primary, emoji="📋", custom_id="support_faq_tools")
     async def faq_tools_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not isinstance(interaction.user, discord.Member):
@@ -2379,7 +2382,13 @@ class OpenSupportTicketView(discord.ui.View):
             if mod_role is None:
                 await interaction.followup.send("Mod role not found. Check MOD_ROLE_ID.", ephemeral=True)
                 return
-            ticket_id = get_support_ticket_id()
+
+            # NEW: Draw a concurrency-safe sequential ticket number from Postgres sequence,
+            # then build the channel name as <ticket_number>-<sanitized_username>.
+            ticket_number = next_ticket_number()
+            sanitized = sanitize_username_for_channel(user.name)
+            channel_name = f"{ticket_number}-{sanitized}"
+
             overwrites = {
                 guild.default_role: discord.PermissionOverwrite(view_channel=False),
                 user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -2389,7 +2398,6 @@ class OpenSupportTicketView(discord.ui.View):
                 overwrites[guild.me] = discord.PermissionOverwrite(
                     view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
                 )
-            channel_name = safe_channel_name("support", ticket_id, user.name)
             ticket_channel = await guild.create_text_channel(
                 name=channel_name,
                 category=category,
@@ -2405,7 +2413,11 @@ class OpenSupportTicketView(discord.ui.View):
                 await control_msg.pin()
             except Exception as e:
                 print(f"Failed to pin support control message: {e}")
+
+            # NEW: First message shows Ticket # and username prominently at the top.
             await ticket_channel.send(
+                f"**Ticket #{ticket_number}**\n"
+                f"**User:** {user.name}\n\n"
                 f"Hello {user.mention},\n\n"
                 "Thank you for reaching out. Before a moderator joins, please check if your question is already covered below — "
                 "most common issues can be resolved instantly.\n\n"
@@ -2455,6 +2467,227 @@ async def ensure_support_panel():
     except Exception as e:
         print(f"Failed to pin support panel message: {e}")
     print("Support panel created.")
+
+
+# =========================
+# MANUAL TICKET CREATION
+# =========================
+async def create_manual_ticket(
+    interaction: discord.Interaction,
+    guild: discord.Guild,
+    user: discord.Member,
+    reason: str
+) -> discord.TextChannel:
+    category = bot.get_channel(SUPPORT_CATEGORY_ID)
+    if category is None:
+        category = await bot.fetch_channel(SUPPORT_CATEGORY_ID)
+    if not isinstance(category, discord.CategoryChannel):
+        raise ValueError(f"Support category is not a category. Got: {type(category)}")
+    mod_role = guild.get_role(MOD_ROLE_ID)
+    if mod_role is None:
+        raise ValueError("Mod role not found. Check MOD_ROLE_ID.")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # NEW: Sequential ticket number + sanitized username for channel name
+    ticket_number = next_ticket_number()
+    sanitized = sanitize_username_for_channel(user.name)
+    channel_name = f"{ticket_number}-{sanitized}"
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+    }
+    if guild.me is not None:
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
+        )
+    ticket_channel = await guild.create_text_channel(
+        name=channel_name,
+        category=category,
+        overwrites=overwrites,
+        topic=f"user_id:{user.id}",
+        reason=f"Manual ticket for {user} - {reason}"
+    )
+
+    # NEW: Opening message includes Ticket # and username
+    opening_message = (
+        f"**Ticket #{ticket_number}**\n"
+        f"**User:** {user.name}\n\n"
+        f"Hello {user.mention}, this private ticket was opened by the moderation team.\n\n"
+        f"**Reason:** {reason}\n\n"
+        "Please reply here and a staff member will assist you."
+    )
+    control_msg = await ticket_channel.send(
+        "🎟️ **Ticket Controls**\n\nUse the buttons below to manage this ticket.",
+        view=SupportTicketControls()
+    )
+    try:
+        await control_msg.pin()
+    except Exception as e:
+        print(f"Failed to pin manual ticket control message: {e}")
+    sent_message = await ticket_channel.send(opening_message)
+    data = load_data()
+    entry = {
+        "timestamp": timestamp,
+        "bundle_id": None,
+        "user": user.name,
+        "user_id": str(user.id),
+        "source": "manual",
+        "show": "Manual Ticket",
+        "prize": None,
+        "code": None,
+        "mod": interaction.user.name,
+        "mod_id": str(interaction.user.id),
+        "channel": interaction.channel.name if interaction.channel else "Unknown",
+        "server": guild.name,
+        "status": "ticket_created",
+        "type": "manual",
+        "reason": reason,
+        "ticket_channel_id": str(ticket_channel.id),
+        "ticket_channel_name": ticket_channel.name,
+        "prompt_message_id": str(sent_message.id),
+        "backend_message_id": None,
+        "prize_catalog_id": None,
+        "prop_firm_id": None,
+        "account_type_id": None,
+        "account_size_id": None,
+        "ticket_number": ticket_number,  # NEW
+    }
+    data["winners"].append(entry)
+    save_data(data)
+    return ticket_channel
+
+
+# =========================
+# GIVEAWAY TICKET CREATION
+# =========================
+async def create_giveaway_ticket_and_log(
+    interaction: discord.Interaction,
+    guild: discord.Guild,
+    user: discord.Member,
+    selected_prizes: list[str],
+    quantity: int = 1,
+    code: str | None = None,
+    show: str | None = None,
+    notes: str | None = None,
+    prize_catalog_ids: list[int | None] | None = None,
+    prop_firm_ids: list[int | None] | None = None,
+    account_type_ids: list[int | None] | None = None,
+    account_size_ids: list[int | None] | None = None,
+) -> tuple[discord.TextChannel, str]:
+    category = bot.get_channel(GIVEAWAY_CATEGORY_ID)
+    if category is None:
+        category = await bot.fetch_channel(GIVEAWAY_CATEGORY_ID)
+    if not isinstance(category, discord.CategoryChannel):
+        raise ValueError(f"Giveaway category is not a category. Got: {type(category)}")
+    mod_role = guild.get_role(MOD_ROLE_ID)
+    if mod_role is None:
+        raise ValueError("Mod role not found. Check MOD_ROLE_ID.")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    bundle_id = uuid.uuid4().hex[:8]
+    prize_text = f"{selected_prizes[0]} x{quantity}" if quantity > 1 else selected_prizes[0]
+    combined_prizes = prize_text if len(selected_prizes) == 1 else " & ".join(selected_prizes)
+    backend_line = format_backend_log_line(user.name, "discord", combined_prizes, code, show)
+    if notes:
+        backend_line += f" | Notes: {notes}"
+    backend_msg = await post_backend_log([backend_line])
+    backend_message_id = str(backend_msg.id) if backend_msg else None
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+    }
+    if guild.me is not None:
+        overwrites[guild.me] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
+        )
+    # Giveaway channels keep the existing winner-{bundle_id}-{username} format unchanged
+    ticket_name = safe_channel_name("winner", bundle_id, user.name)
+    ticket_channel = await guild.create_text_channel(
+        name=ticket_name,
+        category=category,
+        overwrites=overwrites,
+        reason=f"Giveaway ticket for {user} - {', '.join(selected_prizes)}"
+    )
+    prompt_blocks = []
+    for prize in selected_prizes:
+        if len(selected_prizes) == 1:
+            prompt_blocks.append(get_prompt_for_prize(prize, show=show))
+        else:
+            prompt_blocks.append(f"## {prize}\n{get_prompt_for_prize(prize, show=show)}")
+    prompt_body = "\n\n---\n\n".join(prompt_blocks)
+    header = f"{user.mention}\n\n"
+    if len(selected_prizes) == 1:
+        qty_text = f" (x{quantity})" if quantity > 1 else ""
+        header += f"**Prize:** {selected_prizes[0]}{qty_text}\n"
+    else:
+        header += "**Prizes Won:**\n" + "\n".join([f"- {p}" for p in selected_prizes]) + "\n"
+    if show:
+        header += f"**Show:** {show}\n"
+    if code:
+        header += f"**Code:** `{code}`\n"
+    control_msg = await ticket_channel.send(
+        "🎟️ **Giveaway Ticket Controls**\n\nUse the buttons below to manage this ticket.",
+        view=GiveawayTicketControls()
+    )
+    try:
+        await control_msg.pin()
+    except Exception as e:
+        print(f"Failed to pin giveaway control message: {e}")
+    header_sent = await ticket_channel.send(header)
+    header_message_id = str(header_sent.id)
+    prompt_message_id = None
+    if len(prompt_body) <= 2000:
+        prompt_message = await ticket_channel.send(prompt_body)
+        prompt_message_id = str(prompt_message.id)
+    else:
+        chunks = []
+        remaining = prompt_body
+        while len(remaining) > 2000:
+            split_at = remaining.rfind("\n", 0, 2000)
+            if split_at == -1:
+                split_at = 2000
+            chunks.append(remaining[:split_at])
+            remaining = remaining[split_at:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+        first_msg = await ticket_channel.send(chunks[0])
+        prompt_message_id = str(first_msg.id)
+        for chunk in chunks[1:]:
+            await ticket_channel.send(chunk)
+    data = load_data()
+    for i, prize in enumerate(selected_prizes):
+        entry = {
+            "timestamp": timestamp,
+            "bundle_id": bundle_id,
+            "user": user.name,
+            "user_id": str(user.id),
+            "source": "discord",
+            "show": show or "Unknown",
+            "prize": prize,
+            "code": code,
+            "mod": interaction.user.name,
+            "mod_id": str(interaction.user.id),
+            "channel": interaction.channel.name if interaction.channel else "Unknown",
+            "server": guild.name,
+            "status": "ticket_created",
+            "type": "giveaway",
+            "notes": notes,
+            "ticket_channel_id": str(ticket_channel.id),
+            "ticket_channel_name": ticket_channel.name,
+            "backend_message_id": backend_message_id,
+            "prompt_message_id": prompt_message_id,
+            "header_message_id": header_message_id,
+            "prize_catalog_id": prize_catalog_ids[i] if prize_catalog_ids and i < len(prize_catalog_ids) else None,
+            "prop_firm_id": prop_firm_ids[i] if prop_firm_ids and i < len(prop_firm_ids) else None,
+            "account_type_id": account_type_ids[i] if account_type_ids and i < len(account_type_ids) else None,
+            "account_size_id": account_size_ids[i] if account_size_ids and i < len(account_size_ids) else None,
+            "ticket_number": None,  # Giveaway tickets don't use the sequential counter
+        }
+        data["winners"].append(entry)
+    save_data(data)
+    return ticket_channel, bundle_id
 
 
 # =========================
@@ -2629,212 +2862,6 @@ def resolve_prize(prop_firm: str, account_type: str, account_size: str) -> tuple
             "Make sure you selected from the autocomplete options."
         )
     return resolved, None
-
-
-# =========================
-# CORE TICKET / LOGGING
-# =========================
-async def create_giveaway_ticket_and_log(
-    interaction: discord.Interaction,
-    guild: discord.Guild,
-    user: discord.Member,
-    selected_prizes: list[str],
-    quantity: int = 1,
-    code: str | None = None,
-    show: str | None = None,
-    notes: str | None = None,
-    prize_catalog_ids: list[int | None] | None = None,
-    prop_firm_ids: list[int | None] | None = None,
-    account_type_ids: list[int | None] | None = None,
-    account_size_ids: list[int | None] | None = None,
-) -> tuple[discord.TextChannel, str]:
-    category = bot.get_channel(GIVEAWAY_CATEGORY_ID)
-    if category is None:
-        category = await bot.fetch_channel(GIVEAWAY_CATEGORY_ID)
-    if not isinstance(category, discord.CategoryChannel):
-        raise ValueError(f"Giveaway category is not a category. Got: {type(category)}")
-    mod_role = guild.get_role(MOD_ROLE_ID)
-    if mod_role is None:
-        raise ValueError("Mod role not found. Check MOD_ROLE_ID.")
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    bundle_id = uuid.uuid4().hex[:8]
-    prize_text = f"{selected_prizes[0]} x{quantity}" if quantity > 1 else selected_prizes[0]
-    combined_prizes = prize_text if len(selected_prizes) == 1 else " & ".join(selected_prizes)
-    backend_line = format_backend_log_line(user.name, "discord", combined_prizes, code, show)
-    if notes:
-        backend_line += f" | Notes: {notes}"
-    backend_msg = await post_backend_log([backend_line])
-    backend_message_id = str(backend_msg.id) if backend_msg else None
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
-    }
-    if guild.me is not None:
-        overwrites[guild.me] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
-        )
-    ticket_name = safe_channel_name("winner", bundle_id, user.name)
-    ticket_channel = await guild.create_text_channel(
-        name=ticket_name,
-        category=category,
-        overwrites=overwrites,
-        reason=f"Giveaway ticket for {user} - {', '.join(selected_prizes)}"
-    )
-    prompt_blocks = []
-    for prize in selected_prizes:
-        if len(selected_prizes) == 1:
-            prompt_blocks.append(get_prompt_for_prize(prize, show=show))
-        else:
-            prompt_blocks.append(f"## {prize}\n{get_prompt_for_prize(prize, show=show)}")
-    prompt_body = "\n\n---\n\n".join(prompt_blocks)
-    header = f"{user.mention}\n\n"
-    if len(selected_prizes) == 1:
-        qty_text = f" (x{quantity})" if quantity > 1 else ""
-        header += f"**Prize:** {selected_prizes[0]}{qty_text}\n"
-    else:
-        header += "**Prizes Won:**\n" + "\n".join([f"- {p}" for p in selected_prizes]) + "\n"
-    if show:
-        header += f"**Show:** {show}\n"
-    if code:
-        header += f"**Code:** `{code}`\n"
-    control_msg = await ticket_channel.send(
-        "🎟️ **Giveaway Ticket Controls**\n\nUse the buttons below to manage this ticket.",
-        view=GiveawayTicketControls()
-    )
-    try:
-        await control_msg.pin()
-    except Exception as e:
-        print(f"Failed to pin giveaway control message: {e}")
-    header_sent = await ticket_channel.send(header)
-    header_message_id = str(header_sent.id)
-    prompt_message_id = None
-    if len(prompt_body) <= 2000:
-        prompt_message = await ticket_channel.send(prompt_body)
-        prompt_message_id = str(prompt_message.id)
-    else:
-        chunks = []
-        remaining = prompt_body
-        while len(remaining) > 2000:
-            split_at = remaining.rfind("\n", 0, 2000)
-            if split_at == -1:
-                split_at = 2000
-            chunks.append(remaining[:split_at])
-            remaining = remaining[split_at:].lstrip()
-        if remaining:
-            chunks.append(remaining)
-        first_msg = await ticket_channel.send(chunks[0])
-        prompt_message_id = str(first_msg.id)
-        for chunk in chunks[1:]:
-            await ticket_channel.send(chunk)
-    data = load_data()
-    for i, prize in enumerate(selected_prizes):
-        entry = {
-            "timestamp": timestamp,
-            "bundle_id": bundle_id,
-            "user": user.name,
-            "user_id": str(user.id),
-            "source": "discord",
-            "show": show or "Unknown",
-            "prize": prize,
-            "code": code,
-            "mod": interaction.user.name,
-            "mod_id": str(interaction.user.id),
-            "channel": interaction.channel.name if interaction.channel else "Unknown",
-            "server": guild.name,
-            "status": "ticket_created",
-            "type": "giveaway",
-            "notes": notes,
-            "ticket_channel_id": str(ticket_channel.id),
-            "ticket_channel_name": ticket_channel.name,
-            "backend_message_id": backend_message_id,
-            "prompt_message_id": prompt_message_id,
-            "header_message_id": header_message_id,
-            "prize_catalog_id": prize_catalog_ids[i] if prize_catalog_ids and i < len(prize_catalog_ids) else None,
-            "prop_firm_id": prop_firm_ids[i] if prop_firm_ids and i < len(prop_firm_ids) else None,
-            "account_type_id": account_type_ids[i] if account_type_ids and i < len(account_type_ids) else None,
-            "account_size_id": account_size_ids[i] if account_size_ids and i < len(account_size_ids) else None,
-        }
-        data["winners"].append(entry)
-    save_data(data)
-    return ticket_channel, bundle_id
-
-
-async def create_manual_ticket(
-    interaction: discord.Interaction,
-    guild: discord.Guild,
-    user: discord.Member,
-    reason: str
-) -> discord.TextChannel:
-    category = bot.get_channel(SUPPORT_CATEGORY_ID)
-    if category is None:
-        category = await bot.fetch_channel(SUPPORT_CATEGORY_ID)
-    if not isinstance(category, discord.CategoryChannel):
-        raise ValueError(f"Support category is not a category. Got: {type(category)}")
-    mod_role = guild.get_role(MOD_ROLE_ID)
-    if mod_role is None:
-        raise ValueError("Mod role not found. Check MOD_ROLE_ID.")
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        mod_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
-    }
-    if guild.me is not None:
-        overwrites[guild.me] = discord.PermissionOverwrite(
-            view_channel=True, send_messages=True, read_message_history=True, manage_channels=True
-        )
-    ticket_name = safe_channel_name("manual", user.name)
-    ticket_channel = await guild.create_text_channel(
-        name=ticket_name,
-        category=category,
-        overwrites=overwrites,
-        topic=f"user_id:{user.id}",
-        reason=f"Manual ticket for {user} - {reason}"
-    )
-    opening_message = (
-        f"Hello {user.mention}, this private ticket was opened by the moderation team.\n\n"
-        f"**Reason:** {reason}\n\n"
-        "Please reply here and a staff member will assist you."
-    )
-    control_msg = await ticket_channel.send(
-        "🎟️ **Ticket Controls**\n\nUse the buttons below to manage this ticket.",
-        view=SupportTicketControls()
-    )
-    try:
-        await control_msg.pin()
-    except Exception as e:
-        print(f"Failed to pin manual ticket control message: {e}")
-    sent_message = await ticket_channel.send(opening_message)
-    data = load_data()
-    entry = {
-        "timestamp": timestamp,
-        "bundle_id": None,
-        "user": user.name,
-        "user_id": str(user.id),
-        "source": "manual",
-        "show": "Manual Ticket",
-        "prize": None,
-        "code": None,
-        "mod": interaction.user.name,
-        "mod_id": str(interaction.user.id),
-        "channel": interaction.channel.name if interaction.channel else "Unknown",
-        "server": guild.name,
-        "status": "ticket_created",
-        "type": "manual",
-        "reason": reason,
-        "ticket_channel_id": str(ticket_channel.id),
-        "ticket_channel_name": ticket_channel.name,
-        "prompt_message_id": str(sent_message.id),
-        "backend_message_id": None,
-        "prize_catalog_id": None,
-        "prop_firm_id": None,
-        "account_type_id": None,
-        "account_size_id": None,
-    }
-    data["winners"].append(entry)
-    save_data(data)
-    return ticket_channel
 
 
 # =========================
@@ -3099,6 +3126,7 @@ async def youtube(
         "prop_firm_id": resolved["prop_firm_id"],
         "account_type_id": resolved["account_type_id"],
         "account_size_id": resolved["account_size_id"],
+        "ticket_number": None,
     })
     save_data(data)
     msg = f"✅ YouTube winner logged: **{youtube_name}**\nPrize: **{prize}**\n🧾 Bundle ID: `{bundle_id}`"
@@ -3211,6 +3239,7 @@ async def ytmulti(
             "prop_firm_id": r["prop_firm_id"],
             "account_type_id": r["account_type_id"],
             "account_size_id": r["account_size_id"],
+            "ticket_number": None,
         })
     save_data(data)
     summary = " & ".join([r["display_name"] for r in resolved_prizes])
@@ -3283,6 +3312,7 @@ async def track(
         "prop_firm_id": resolved["prop_firm_id"],
         "account_type_id": resolved["account_type_id"],
         "account_size_id": resolved["account_size_id"],
+        "ticket_number": None,
     })
     save_data(data)
     msg = f"✅ {user.mention} tracked without opening a ticket.\nPrize: **{prize}**\n🧾 Bundle ID: `{bundle_id}`"
@@ -3606,14 +3636,13 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     except Exception:
         pass
 
+
 # =========================
 # /faq ADMIN COMMANDS
 # =========================
 faq_group = app_commands.Group(name="faq", description="Manage FAQ entries")
 faq_category_group = app_commands.Group(name="category", description="Manage FAQ categories", parent=faq_group)
 
-
-# ── /faq add ──────────────────────────────────────────────────────────────────
 
 class FaqAddCategorySelect(discord.ui.Select):
     def __init__(self, categories: list[dict]):
@@ -3702,8 +3731,6 @@ async def faq_add(interaction: discord.Interaction):
         ephemeral=True
     )
 
-
-# ── /faq edit ─────────────────────────────────────────────────────────────────
 
 class FaqEditCategorySelect(discord.ui.Select):
     def __init__(self, categories: list[dict]):
@@ -3820,8 +3847,6 @@ async def faq_edit(interaction: discord.Interaction):
     )
 
 
-# ── /faq delete ───────────────────────────────────────────────────────────────
-
 class FaqDeleteCategorySelect(discord.ui.Select):
     def __init__(self, categories: list[dict]):
         options = [
@@ -3932,335 +3957,6 @@ async def faq_delete(interaction: discord.Interaction):
         ephemeral=True
     )
 
-
-# =========================
-# /faq ADMIN COMMANDS
-# =========================
-faq_group = app_commands.Group(name="faq", description="Manage FAQ entries")
-faq_category_group = app_commands.Group(name="category", description="Manage FAQ categories", parent=faq_group)
-
-
-# ── /faq add ──────────────────────────────────────────────────────────────────
-
-class FaqAddCategorySelect(discord.ui.Select):
-    def __init__(self, categories: list[dict]):
-        options = [
-            discord.SelectOption(label=c["name"], value=str(c["id"]))
-            for c in categories[:25]
-        ]
-        super().__init__(placeholder="Select a category", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        category_id = int(self.values[0])
-        category_name = next(o.label for o in self.options if o.value == self.values[0])
-        await interaction.response.send_modal(FaqAddModal(category_id=category_id, category_name=category_name))
-
-
-class FaqAddCategoryView(discord.ui.View):
-    def __init__(self, categories: list[dict]):
-        super().__init__(timeout=120)
-        self.add_item(FaqAddCategorySelect(categories))
-
-
-class FaqAddModal(discord.ui.Modal):
-    def __init__(self, category_id: int, category_name: str):
-        super().__init__(title=f"Add FAQ — {category_name[:40]}")
-        self.category_id = category_id
-        self.question_input = discord.ui.TextInput(
-            label="Question",
-            placeholder="Enter the question",
-            max_length=200,
-            required=True
-        )
-        self.answer_input = discord.ui.TextInput(
-            label="Answer",
-            placeholder="Enter the answer",
-            max_length=1800,
-            required=True,
-            style=discord.TextStyle.paragraph
-        )
-        self.add_item(self.question_input)
-        self.add_item(self.answer_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        SELECT COALESCE(MAX(sort_order), -1) + 1
-                        FROM faq_entries
-                        WHERE category_id = %s AND active = true
-                    """, (self.category_id,))
-                    next_sort = cur.fetchone()[0]
-                    cur.execute("""
-                        INSERT INTO faq_entries
-                            (category_id, question, answer, visibility, escalate, active, sort_order,
-                             created_by_discord_id, updated_by_discord_id)
-                        VALUES (%s, %s, %s, 'public', false, true, %s, %s, %s)
-                    """, (
-                        self.category_id,
-                        self.question_input.value.strip(),
-                        self.answer_input.value.strip(),
-                        next_sort,
-                        str(interaction.user.id),
-                        str(interaction.user.id),
-                    ))
-                conn.commit()
-            await interaction.response.send_message(
-                f"✅ FAQ added successfully.\n**Q:** {self.question_input.value.strip()[:100]}",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Failed to add FAQ: `{e}`", ephemeral=True)
-
-
-@faq_group.command(name="add", description="Add a new FAQ question to a category")
-async def faq_add(interaction: discord.Interaction):
-    if not await ensure_mod(interaction):
-        return
-    categories = get_active_faq_categories()
-    if not categories:
-        await interaction.response.send_message("❌ No active categories found.", ephemeral=True)
-        return
-    view = FaqAddCategoryView(categories)
-    await interaction.response.send_message(
-        "Select a category to add the FAQ to:",
-        view=view,
-        ephemeral=True
-    )
-
-
-# ── /faq edit ─────────────────────────────────────────────────────────────────
-
-class FaqEditCategorySelect(discord.ui.Select):
-    def __init__(self, categories: list[dict]):
-        options = [
-            discord.SelectOption(label=c["name"], value=str(c["id"]))
-            for c in categories[:25]
-        ]
-        super().__init__(placeholder="Select a category", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        category_id = int(self.values[0])
-        entries = get_faq_entries_by_category(category_id, visibility="all")
-        if not entries:
-            await interaction.response.edit_message(
-                content="❌ No active entries in that category.", view=None
-            )
-            return
-        view = FaqEditQuestionView(entries=entries)
-        await interaction.response.edit_message(
-            content="Select a question to edit:",
-            view=view
-        )
-
-
-class FaqEditCategoryView(discord.ui.View):
-    def __init__(self, categories: list[dict]):
-        super().__init__(timeout=120)
-        self.add_item(FaqEditCategorySelect(categories))
-
-
-class FaqEditQuestionSelect(discord.ui.Select):
-    def __init__(self, entries: list[dict]):
-        options = [
-            discord.SelectOption(label=e["question"][:100], value=str(e["id"]))
-            for e in entries[:25]
-        ]
-        super().__init__(placeholder="Select a question", min_values=1, max_values=1, options=options)
-        self.entries = entries
-
-    async def callback(self, interaction: discord.Interaction):
-        entry_id = int(self.values[0])
-        entry = get_faq_entry_by_id(entry_id)
-        if not entry:
-            await interaction.response.edit_message(content="❌ Entry not found.", view=None)
-            return
-        await interaction.response.send_modal(FaqEditModal(entry=entry))
-
-
-class FaqEditQuestionView(discord.ui.View):
-    def __init__(self, entries: list[dict]):
-        super().__init__(timeout=120)
-        self.add_item(FaqEditQuestionSelect(entries))
-
-
-class FaqEditModal(discord.ui.Modal):
-    def __init__(self, entry: dict):
-        super().__init__(title="Edit FAQ")
-        self.entry_id = entry["id"]
-        self.question_input = discord.ui.TextInput(
-            label="Question",
-            default=entry["question"][:200],
-            max_length=200,
-            required=True
-        )
-        self.answer_input = discord.ui.TextInput(
-            label="Answer",
-            default=entry["answer"][:1800],
-            max_length=1800,
-            required=True,
-            style=discord.TextStyle.paragraph
-        )
-        self.add_item(self.question_input)
-        self.add_item(self.answer_input)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE faq_entries
-                        SET question = %s,
-                            answer = %s,
-                            updated_at = now(),
-                            updated_by_discord_id = %s
-                        WHERE id = %s
-                    """, (
-                        self.question_input.value.strip(),
-                        self.answer_input.value.strip(),
-                        str(interaction.user.id),
-                        self.entry_id,
-                    ))
-                conn.commit()
-            await interaction.response.send_message(
-                f"✅ FAQ updated.\n**Q:** {self.question_input.value.strip()[:100]}",
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ Failed to update FAQ: `{e}`", ephemeral=True)
-
-
-@faq_group.command(name="edit", description="Edit an existing FAQ question")
-async def faq_edit(interaction: discord.Interaction):
-    if not await ensure_mod(interaction):
-        return
-    categories = get_active_faq_categories()
-    if not categories:
-        await interaction.response.send_message("❌ No active categories found.", ephemeral=True)
-        return
-    view = FaqEditCategoryView(categories)
-    await interaction.response.send_message(
-        "Select the category containing the FAQ to edit:",
-        view=view,
-        ephemeral=True
-    )
-
-
-# ── /faq delete ───────────────────────────────────────────────────────────────
-
-class FaqDeleteCategorySelect(discord.ui.Select):
-    def __init__(self, categories: list[dict]):
-        options = [
-            discord.SelectOption(label=c["name"], value=str(c["id"]))
-            for c in categories[:25]
-        ]
-        super().__init__(placeholder="Select a category", min_values=1, max_values=1, options=options)
-
-    async def callback(self, interaction: discord.Interaction):
-        category_id = int(self.values[0])
-        entries = get_faq_entries_by_category(category_id, visibility="all")
-        if not entries:
-            await interaction.response.edit_message(
-                content="❌ No active entries in that category.", view=None
-            )
-            return
-        view = FaqDeleteQuestionView(entries=entries)
-        await interaction.response.edit_message(
-            content="Select a question to delete:",
-            view=view
-        )
-
-
-class FaqDeleteCategoryView(discord.ui.View):
-    def __init__(self, categories: list[dict]):
-        super().__init__(timeout=120)
-        self.add_item(FaqDeleteCategorySelect(categories))
-
-
-class FaqDeleteQuestionSelect(discord.ui.Select):
-    def __init__(self, entries: list[dict]):
-        options = [
-            discord.SelectOption(label=e["question"][:100], value=str(e["id"]))
-            for e in entries[:25]
-        ]
-        super().__init__(placeholder="Select a question to delete", min_values=1, max_values=1, options=options)
-        self.entries = entries
-
-    async def callback(self, interaction: discord.Interaction):
-        entry_id = int(self.values[0])
-        entry = get_faq_entry_by_id(entry_id)
-        if not entry:
-            await interaction.response.edit_message(content="❌ Entry not found.", view=None)
-            return
-        view = FaqDeleteConfirmView(entry_id=entry_id, question=entry["question"])
-        await interaction.response.edit_message(
-            content=(
-                f"⚠️ **Confirm delete**\n\n"
-                f"**Q:** {entry['question'][:200]}\n\n"
-                "This will soft-delete the entry (sets active = false). It can be restored via the database."
-            ),
-            view=view
-        )
-
-
-class FaqDeleteQuestionView(discord.ui.View):
-    def __init__(self, entries: list[dict]):
-        super().__init__(timeout=120)
-        self.add_item(FaqDeleteQuestionSelect(entries))
-
-
-class FaqDeleteConfirmView(discord.ui.View):
-    def __init__(self, entry_id: int, question: str):
-        super().__init__(timeout=60)
-        self.entry_id = entry_id
-        self.question = question
-
-    @discord.ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger, emoji="🗑️")
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            with get_db() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        UPDATE faq_entries
-                        SET active = false,
-                            updated_at = now(),
-                            updated_by_discord_id = %s
-                        WHERE id = %s
-                    """, (str(interaction.user.id), self.entry_id))
-                conn.commit()
-            await interaction.response.edit_message(
-                content=f"🗑️ FAQ deleted: **{self.question[:100]}**",
-                view=None
-            )
-        except Exception as e:
-            await interaction.response.edit_message(
-                content=f"❌ Failed to delete FAQ: `{e}`",
-                view=None
-            )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.edit_message(content="Cancelled.", view=None)
-
-
-@faq_group.command(name="delete", description="Delete a FAQ question (soft delete)")
-async def faq_delete(interaction: discord.Interaction):
-    if not await ensure_mod(interaction):
-        return
-    categories = get_active_faq_categories()
-    if not categories:
-        await interaction.response.send_message("❌ No active categories found.", ephemeral=True)
-        return
-    view = FaqDeleteCategoryView(categories)
-    await interaction.response.send_message(
-        "Select the category containing the FAQ to delete:",
-        view=view,
-        ephemeral=True
-    )
-
-
-# ── /faq category add ─────────────────────────────────────────────────────────
 
 class FaqCategoryAddModal(discord.ui.Modal, title="Add FAQ Category"):
     name_input = discord.ui.TextInput(
@@ -4307,8 +4003,6 @@ async def faq_category_add(interaction: discord.Interaction):
     await interaction.response.send_modal(FaqCategoryAddModal())
 
 
-# ── /faq category delete ──────────────────────────────────────────────────────
-
 class FaqCategoryDeleteSelect(discord.ui.Select):
     def __init__(self, categories: list[dict]):
         options = [
@@ -4351,7 +4045,6 @@ class FaqCategoryDeleteConfirmView(discord.ui.View):
         try:
             with get_db() as conn:
                 with conn.cursor() as cur:
-                    # Soft delete all entries in the category first
                     cur.execute("""
                         UPDATE faq_entries
                         SET active = false,
@@ -4359,7 +4052,6 @@ class FaqCategoryDeleteConfirmView(discord.ui.View):
                             updated_by_discord_id = %s
                         WHERE category_id = %s
                     """, (str(interaction.user.id), self.category_id))
-                    # Soft delete the category
                     cur.execute("""
                         UPDATE faq_categories
                         SET active = false,
@@ -4401,6 +4093,5 @@ async def faq_category_delete(interaction: discord.Interaction):
 
 # Register the /faq command group
 tree.add_command(faq_group, guild=discord.Object(id=GUILD_ID))
-
 
 bot.run(TOKEN)
