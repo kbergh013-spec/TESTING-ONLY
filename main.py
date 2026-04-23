@@ -1779,36 +1779,79 @@ class InactivityControlView(discord.ui.View):
 
 
 # =========================
-# CLOSE TICKET HELPER (reused by inactivity loop)
+# DELETE TICKET HELPER (reused by inactivity loop)
 # =========================
 
-async def _close_ticket_channel(channel: discord.TextChannel, reason: str):
+async def _delete_ticket_channel(channel: discord.TextChannel, reason: str):
     """
-    Mirrors the logic in SupportTicketControls.close_button / GiveawayTicketControls.close_ticket
-    exactly — renames to closed-{name} and revokes send_messages for non-mod members.
-    Does NOT delete; a separate delete must be triggered by a mod.
+    Saves a transcript then deletes the channel.
+    Called by the inactivity loop after the grace period expires and
+    auto_close_disabled is false.
     """
     if channel.name.startswith("closed-"):
-        return  # Already closed — idempotent
+        return  # Already closed/deleted — idempotent
 
     try:
-        new_overwrites = {}
-        for target, overwrite in channel.overwrites.items():
-            if isinstance(target, discord.Member) and not user_is_mod(target):
-                overwrite = discord.PermissionOverwrite.from_pair(
-                    overwrite.pair()[0], overwrite.pair()[1]
-                )
-                overwrite.send_messages = False
-            new_overwrites[target] = overwrite
+        # Determine ticket type and user info for the transcript
+        is_giveaway = is_giveaway_ticket_channel(channel)
+        is_support = is_support_ticket_channel(channel)
+        ticket_type = "giveaway" if is_giveaway else ("support" if is_support else "manual")
 
-        new_name = f"closed-{channel.name}"
-        await channel.edit(name=new_name, overwrites=new_overwrites, reason=reason)
+        guild = channel.guild
+        bundle_id = get_bundle_id_from_channel(channel)
+        entries = find_entries_for_channel(channel)
+        uid = entries[0].get("user_id") if entries else None
+        uname = entries[0].get("user") if entries else None
+
+        # Fall back to channel topic for panel support tickets
+        if uid is None and guild:
+            uid, uname = extract_user_from_channel(channel, guild)
+
+        # Notify before deleting so the user sees it if they're watching
         await channel.send(
-            "🔒 This ticket has been automatically closed due to inactivity. "
-            "A moderator can reopen it using the **Reopen Ticket** button above if needed."
+            "🗑️ This ticket is being automatically deleted due to inactivity."
         )
+
+        # Save transcript using a sentinel Member-like object isn't possible from
+        # a background task — pass a string label instead via the deleted_by field
+        try:
+            messages = []
+            async for msg in channel.history(limit=None, oldest_first=True):
+                messages.append({
+                    "author": str(msg.author),
+                    "author_id": str(msg.author.id),
+                    "content": msg.content,
+                    "timestamp": msg.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                    "attachments": [a.url for a in msg.attachments],
+                    "embeds": len(msg.embeds) > 0
+                })
+            import json as _json
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO transcripts (
+                            channel_id, channel_name, ticket_type, bundle_id,
+                            user_id, user_name, deleted_by, deleted_at, messages
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        str(channel.id),
+                        channel.name,
+                        ticket_type,
+                        bundle_id,
+                        uid,
+                        uname,
+                        "auto-deleted (inactivity)",
+                        datetime.now(),
+                        _json.dumps(messages)
+                    ))
+                conn.commit()
+        except Exception as te:
+            print(f"[INACTIVITY] Transcript save failed for #{channel.name}: {te}")
+
+        await channel.delete(reason=reason)
+        print(f"[INACTIVITY] Deleted #{channel.name}")
     except Exception as e:
-        print(f"[INACTIVITY] Failed to auto-close #{channel.name}: {e}")
+        print(f"[INACTIVITY] Failed to auto-delete #{channel.name}: {e}")
 
 
 # =========================
@@ -1922,14 +1965,13 @@ async def _inactivity_loop():
 
                     hours_since_warning = (now_utc - warning_sent_at).total_seconds() / 3600
                     if hours_since_warning >= INACTIVITY_CLOSE_AFTER_WARN_HOURS:
-                        print(f"[INACTIVITY] Auto-closing #{channel.name} "
+                        print(f"[INACTIVITY] Auto-deleting #{channel.name} "
                               f"(warned {hours_since_warning:.1f}h ago)")
-                        await _close_ticket_channel(
-                            channel,
-                            reason="Auto-closed due to inactivity"
-                        )
-                        # Mark completed in DB so this ticket is never processed again
                         await mark_channel_entries_completed(channel)
+                        await _delete_ticket_channel(
+                            channel,
+                            reason="Auto-deleted due to inactivity"
+                        )
 
         except Exception as e:
             print(f"[INACTIVITY ERROR] Loop iteration failed: {e}")
@@ -2338,6 +2380,54 @@ class GiveawayTicketControls(discord.ui.View):
                 view=view,
                 ephemeral=True
             )
+
+    @discord.ui.button(label="Keep Open (Disable Auto-Close)", style=discord.ButtonStyle.success, emoji="🔓", custom_id="giveaway_disable_auto_close", row=1)
+    async def disable_auto_close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
+            await interaction.response.send_message("❌ Only moderators can disable auto-close.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
+            return
+        await asyncio.to_thread(
+            update_ticket_inactivity_fields,
+            str(channel.id),
+            auto_close_disabled=True,
+            auto_close_disabled_by=interaction.user.name,
+            auto_close_disabled_at=datetime.utcnow(),
+        )
+        await interaction.response.send_message(
+            f"✅ Auto-close has been **disabled** for this ticket by {interaction.user.mention}. "
+            "The ticket will remain open until manually closed or deleted.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Re-enable Auto-Close", style=discord.ButtonStyle.secondary, emoji="⏱️", custom_id="giveaway_enable_auto_close", row=1)
+    async def enable_auto_close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
+            await interaction.response.send_message("❌ Only moderators can re-enable auto-close.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
+            return
+        now = datetime.utcnow()
+        await asyncio.to_thread(
+            update_ticket_inactivity_fields,
+            str(channel.id),
+            auto_close_disabled=False,
+            auto_close_disabled_by=None,
+            auto_close_disabled_at=None,
+            last_activity_at=now,
+            clear_warning=True,
+        )
+        await interaction.response.send_message(
+            f"✅ Auto-close has been **re-enabled** by {interaction.user.mention}. "
+            f"The inactivity timer has been reset — the ticket will warn again after "
+            f"{INACTIVITY_WARN_HOURS} hours of inactivity.",
+            ephemeral=True
+        )
 
 
 class OldPrizePickSelect(discord.ui.Select):
@@ -2791,6 +2881,54 @@ class SupportTicketControls(discord.ui.View):
                 view=view,
                 ephemeral=True
             )
+
+    @discord.ui.button(label="Keep Open (Disable Auto-Close)", style=discord.ButtonStyle.success, emoji="🔓", custom_id="support_disable_auto_close", row=1)
+    async def disable_auto_close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
+            await interaction.response.send_message("❌ Only moderators can disable auto-close.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
+            return
+        await asyncio.to_thread(
+            update_ticket_inactivity_fields,
+            str(channel.id),
+            auto_close_disabled=True,
+            auto_close_disabled_by=interaction.user.name,
+            auto_close_disabled_at=datetime.utcnow(),
+        )
+        await interaction.response.send_message(
+            f"✅ Auto-close has been **disabled** for this ticket by {interaction.user.mention}. "
+            "The ticket will remain open until manually closed or deleted.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="Re-enable Auto-Close", style=discord.ButtonStyle.secondary, emoji="⏱️", custom_id="support_enable_auto_close", row=1)
+    async def enable_auto_close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
+            await interaction.response.send_message("❌ Only moderators can re-enable auto-close.", ephemeral=True)
+            return
+        channel = interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("❌ Must be used inside a ticket channel.", ephemeral=True)
+            return
+        now = datetime.utcnow()
+        await asyncio.to_thread(
+            update_ticket_inactivity_fields,
+            str(channel.id),
+            auto_close_disabled=False,
+            auto_close_disabled_by=None,
+            auto_close_disabled_at=None,
+            last_activity_at=now,
+            clear_warning=True,
+        )
+        await interaction.response.send_message(
+            f"✅ Auto-close has been **re-enabled** by {interaction.user.mention}. "
+            f"The inactivity timer has been reset — the ticket will warn again after "
+            f"{INACTIVITY_WARN_HOURS} hours of inactivity.",
+            ephemeral=True
+        )
 
 
 class OpenSupportTicketView(discord.ui.View):
