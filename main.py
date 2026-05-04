@@ -2281,9 +2281,10 @@ class DeleteConfirmView(discord.ui.View):
         if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
             await interaction.response.send_message("❌ Only mods can delete tickets.", ephemeral=True)
             return
+        await interaction.response.defer()
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or not is_bot_ticket_channel(channel):
-            await interaction.response.send_message("❌ This button only works inside this bot's ticket channels.", ephemeral=True)
+            await interaction.followup.send("❌ This button only works inside this bot's ticket channels.", ephemeral=True)
             return
         await mark_channel_entries_completed(channel)
         bundle_id = get_bundle_id_from_channel(channel)
@@ -2292,7 +2293,7 @@ class DeleteConfirmView(discord.ui.View):
         uname = entries[0].get("user") if entries else None
         ticket_type = "giveaway" if is_giveaway_ticket_channel(channel) else "manual"
         await save_transcript(channel, ticket_type, interaction.user, bundle_id, uid, uname)
-        await interaction.response.send_message("🗑️ Ticket marked complete and deleting in 3 seconds.", ephemeral=False)
+        await interaction.followup.send("🗑️ Ticket marked complete and deleting in 3 seconds.", ephemeral=False)
         await asyncio.sleep(3)
         try:
             await channel.delete(reason=f"Ticket deleted by {interaction.user}")
@@ -2809,14 +2810,15 @@ class SupportDeleteConfirmView(discord.ui.View):
         if not isinstance(interaction.user, discord.Member) or not user_is_mod(interaction.user):
             await interaction.response.send_message("❌ Only mods can delete support tickets.", ephemeral=True)
             return
+        await interaction.response.defer()
         channel = interaction.channel
         if not isinstance(channel, discord.TextChannel) or not is_support_ticket_channel(channel):
-            await interaction.response.send_message("❌ This only works inside support tickets.", ephemeral=True)
+            await interaction.followup.send("❌ This only works inside support tickets.", ephemeral=True)
             return
         guild = interaction.guild
         uid, uname = extract_user_from_channel(channel, guild) if guild else (None, None)
         await save_transcript(channel, "support", interaction.user, None, uid, uname)
-        await interaction.response.send_message("🗑️ Deleting support ticket in 3 seconds.", ephemeral=False)
+        await interaction.followup.send("🗑️ Deleting support ticket in 3 seconds.", ephemeral=False)
         await asyncio.sleep(3)
         try:
             await channel.delete(reason=f"Support ticket deleted by {interaction.user}")
