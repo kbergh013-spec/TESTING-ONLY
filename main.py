@@ -889,6 +889,7 @@ def get_prompt_for_prize(prize: str, show: str | None = None) -> str:
         "Alpha Futures": ("alpha", True),
         "Funded Next": ("funded_next", True),
         "Tradeify": ("tradeify", True),
+        "Lucid Lootbox": ("lucid_lootbox", False),
         "Lucid": ("lucid", True),
         "MFF": ("mff", True),
         "FFF": ("fff", True),
