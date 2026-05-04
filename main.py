@@ -908,7 +908,9 @@ def get_prompt_for_prize(prize: str, show: str | None = None) -> str:
             elif not has_account_type and len(parts) >= 1:
                 size = parts[-1]
                 return render_prompt(prompt_key, show=show, size=size)
-
+            elif not has_account_type and len(parts) == 0:
+                return render_prompt(prompt_key, show=show)
+    
     return (
         f"🎉 **Congratulations!**\n\n"
         f"You won **{prize}**.\n\n"
