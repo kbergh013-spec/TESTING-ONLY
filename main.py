@@ -2954,7 +2954,7 @@ class SupportTicketControls(discord.ui.View):
         await interaction.response.send_message(
             f"✅ Auto-close has been **disabled** for this ticket by {interaction.user.mention}. "
             "The ticket will remain open until manually closed or deleted.",
-            ephemeral=True
+            ephemeral=False
         )
 
     @discord.ui.button(label="Re-enable Auto-Close", style=discord.ButtonStyle.secondary, emoji="⏱️", custom_id="support_enable_auto_close", row=1)
