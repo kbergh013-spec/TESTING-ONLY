@@ -555,7 +555,7 @@ _FAQ_SEED: list[dict] = [
             },
             {
                 "question": "Where do I find my indicators on WealthCharts?",
-                "answer": "https://scribehow.com/embed-preview/How_to_Access_MOT_Indicators_on_Wealthcharts__rrasDmTlT62JUoKS_Ju-wg?as=slides&size=flexible",
+                "answer": "https://scribehow.com/embed-preview/How_to_Access_MOT_Indicators_on_Wealthcharts__rrAsDmT1T62JUoKS_Ju-wg?as=slides&size=flexible",
                 "sort_order": 2,
             },
         ],
